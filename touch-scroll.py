@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """touch-scroll
 
-Translates touchscreen vertical swipe gestures into scroll-wheel events via a
-uinput virtual device.  The virtual device is discovered by libinput/wlroots
-and forwarded to Wayland clients as wl_pointer.axis events, giving native
-scroll behaviour in Chromium, Firefox, and any other Wayland application.
+Two-finger swipe gestures → scroll-wheel events via uinput.
+Single-finger touches are ignored entirely so tapping, button presses, and
+slider dragging all work normally through the compositor's existing
+touch-as-pointer emulation.
 
-Does NOT grab the touch device, so tapping and control-dragging continue to
-work normally via the compositor's existing touch-as-pointer emulation.
+  Two-finger vertical swipe   → REL_WHEEL  (page scroll, natural direction)
+  Two-finger horizontal swipe → REL_HWHEEL (swipe-navigation in HA)
+
+Direction is locked after LOCK_DISTANCE device units of midpoint travel so
+a slightly diagonal swipe commits cleanly to one axis.
 """
 
 import time
@@ -16,21 +19,20 @@ from evdev import InputDevice, UInput, ecodes as e
 
 # ── Tuning ─────────────────────────────────────────────────────────────────────
 
-# How many scroll ticks to traverse the full screen height.
-# Higher = faster scroll; lower = slower.
+# Scroll ticks to traverse the full screen height / width.
+# Higher = faster; lower = slower.
 TICKS_PER_SCREEN = 40
 
-# Substring to match against device names when locating the touchscreen.
-DEVICE_NAME_HINT = 'ft5'
+# Midpoint travel (raw device units) before committing to an axis.
+LOCK_DISTANCE = 20
 
-# Seconds to wait between retries while the device isn't yet available.
+DEVICE_NAME_HINT = 'ft5'
 RETRY_DELAY = 1
 MAX_RETRIES = 30
 
 # ── Device discovery ───────────────────────────────────────────────────────────
 
 def find_touch_device():
-    """Return the first multitouch InputDevice, preferring the ft5x06."""
     for attempt in range(MAX_RETRIES):
         candidates = []
         for path in evdev.list_devices():
@@ -42,84 +44,135 @@ def find_touch_device():
                 abs_codes = [c for c, _ in caps[e.EV_ABS]]
                 if e.ABS_MT_POSITION_Y not in abs_codes:
                     continue
-                # Prefer the named device
                 if DEVICE_NAME_HINT.lower() in dev.name.lower():
-                    print(f"[touch-scroll] Found touch device: {dev.name} ({dev.path})",
-                          flush=True)
+                    print(f"[touch-scroll] Found: {dev.name} ({dev.path})", flush=True)
                     return dev
                 candidates.append(dev)
             except Exception:
                 pass
         if candidates:
             dev = candidates[0]
-            print(f"[touch-scroll] Found touch device: {dev.name} ({dev.path})",
-                  flush=True)
+            print(f"[touch-scroll] Found: {dev.name} ({dev.path})", flush=True)
             return dev
         print(f"[touch-scroll] No touch device yet, retrying ({attempt+1}/{MAX_RETRIES})…",
               flush=True)
         time.sleep(RETRY_DELAY)
     return None
 
-# ── Main loop ──────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
     dev = find_touch_device()
     if dev is None:
-        print("[touch-scroll] ERROR: No multitouch device found after retries.", flush=True)
+        print("[touch-scroll] ERROR: No multitouch device found.", flush=True)
         raise SystemExit(1)
 
-    # Read Y-axis range so scroll speed is proportional to screen size
-    abs_caps       = dict(dev.capabilities().get(e.EV_ABS, []))
-    y_info         = abs_caps.get(e.ABS_MT_POSITION_Y)
-    y_range        = (y_info.max - y_info.min) if y_info else 4095
-    pixels_per_tick = max(y_range / TICKS_PER_SCREEN, 1)
+    abs_caps   = dict(dev.capabilities().get(e.EV_ABS, []))
+    y_info     = abs_caps.get(e.ABS_MT_POSITION_Y)
+    x_info     = abs_caps.get(e.ABS_MT_POSITION_X)
+    y_range    = (y_info.max - y_info.min) if y_info else 4095
+    x_range    = (x_info.max - x_info.min) if x_info else 4095
+    v_per_tick = max(y_range / TICKS_PER_SCREEN, 1)
+    h_per_tick = max(x_range / TICKS_PER_SCREEN, 1)
 
-    print(f"[touch-scroll] Y range: 0–{y_range}, {pixels_per_tick:.1f} units/tick", flush=True)
+    print(f"[touch-scroll] Y 0–{y_range} ({v_per_tick:.1f}/tick)  "
+          f"X 0–{x_range} ({h_per_tick:.1f}/tick)", flush=True)
 
-    # Virtual pointer device — must have EV_REL + BTN_* for libinput to
-    # classify it as a pointer and forward its axis events to Wayland clients.
     ui = UInput(
         {
-            e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL],
+            e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL],
             e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE],
         },
         name='touch-scroll-virtual',
         version=0x3,
     )
 
-    tracking_id = None   # current active finger (None = no touch)
-    last_y      = None   # last reported Y position
-    accum       = 0.0    # sub-tick accumulator
+    # Multitouch slot state — protocol B uses numbered slots
+    slots    = {}    # slot_id → {'tid': int, 'x': int, 'y': int}
+    cur_slot = 0
 
-    print("[touch-scroll] Running — swipe up/down to scroll.", flush=True)
+    # Two-finger gesture state
+    start_x = start_y = None   # midpoint at direction-lock moment
+    direction = None            # 'v' | 'h' | None
+    accum = 0.0
 
-    for event in dev.read_loop():
-        if event.type != e.EV_ABS:
-            continue
+    print("[touch-scroll] Running — two-finger swipe to scroll/navigate.", flush=True)
 
-        # ── Finger down / up ──────────────────────────────────────────────────
-        if event.code == e.ABS_MT_TRACKING_ID:
-            if event.value == -1:          # finger lifted
-                tracking_id = None
-                last_y      = None
-                accum       = 0.0
-            else:                          # new finger contact
-                tracking_id = event.value
-                last_y      = None
-                accum       = 0.0
+    for ev in dev.read_loop():
 
-        # ── Finger motion ─────────────────────────────────────────────────────
-        elif event.code == e.ABS_MT_POSITION_Y and tracking_id is not None:
-            if last_y is not None:
-                # Positive delta = finger moved up = scroll up (content follows finger)
-                delta  = last_y - event.value
-                accum += delta
-                ticks  = int(accum / pixels_per_tick)
+        # ── Slot selection ─────────────────────────────────────────────────────
+        if ev.type == e.EV_ABS and ev.code == e.ABS_MT_SLOT:
+            cur_slot = ev.value
+            slots.setdefault(cur_slot, {'tid': -1, 'x': 0, 'y': 0})
+
+        # ── Tracking ID (finger down / up) ─────────────────────────────────────
+        elif ev.type == e.EV_ABS and ev.code == e.ABS_MT_TRACKING_ID:
+            slots.setdefault(cur_slot, {'tid': -1, 'x': 0, 'y': 0})
+            slots[cur_slot]['tid'] = ev.value
+            if ev.value == -1:
+                # Finger lifted — reset gesture if we fall below two fingers
+                active = [s for s in slots.values() if s['tid'] != -1]
+                if len(active) < 2:
+                    start_x = start_y = None
+                    direction = None
+                    accum = 0.0
+
+        # ── Position updates ───────────────────────────────────────────────────
+        elif ev.type == e.EV_ABS and ev.code == e.ABS_MT_POSITION_X:
+            slots.setdefault(cur_slot, {'tid': -1, 'x': 0, 'y': 0})
+            slots[cur_slot]['x'] = ev.value
+
+        elif ev.type == e.EV_ABS and ev.code == e.ABS_MT_POSITION_Y:
+            slots.setdefault(cur_slot, {'tid': -1, 'x': 0, 'y': 0})
+            slots[cur_slot]['y'] = ev.value
+
+        # ── Process gesture at sync boundary ───────────────────────────────────
+        elif ev.type == e.EV_SYN and ev.code == e.SYN_REPORT:
+            active = [s for s in slots.values() if s['tid'] != -1]
+            if len(active) != 2:
+                continue   # only act on exactly two-finger touches
+
+            # Midpoint of both fingers
+            avg_x = (active[0]['x'] + active[1]['x']) / 2
+            avg_y = (active[0]['y'] + active[1]['y']) / 2
+
+            if start_x is None:
+                start_x, start_y = avg_x, avg_y
+                continue
+
+            # Direction lock
+            if direction is None:
+                dx = abs(avg_x - start_x)
+                dy = abs(avg_y - start_y)
+                if dx + dy < LOCK_DISTANCE:
+                    continue
+                direction = 'h' if dx > dy else 'v'
+                accum = float(avg_y - start_y) if direction == 'v' \
+                        else float(avg_x - start_x)
+                start_x, start_y = avg_x, avg_y
+                continue
+
+            # Emit events
+            if direction == 'v':
+                # Swipe down (Y increases) → scroll down (negative wheel)
+                accum += avg_y - start_y
+                ticks  = int(accum / v_per_tick)
                 if ticks:
                     ui.write(e.EV_REL, e.REL_WHEEL, ticks)
                     ui.syn()
-                    accum -= ticks * pixels_per_tick
-            last_y = event.value
+                    accum -= ticks * v_per_tick
+
+            elif direction == 'h':
+                # Swipe right (X increases) → positive hwheel
+                accum += avg_x - start_x
+                ticks  = int(accum / h_per_tick)
+                if ticks:
+                    ui.write(e.EV_REL, e.REL_HWHEEL, ticks)
+                    ui.syn()
+                    accum -= ticks * h_per_tick
+
+            start_x, start_y = avg_x, avg_y
+
 
 if __name__ == '__main__':
     main()
