@@ -886,6 +886,12 @@ if [ -n "$KIOSK_URL" ]; then
 pkill lxpanel || true
 pkill wfbar || true
 
+# Re-apply WM8960 hardware speaker level (0 dB = numid=13 value 122).
+# This runs here in addition to smart-display-audio-init.service because the
+# audio-init service fires early in boot before the codec registers have fully
+# settled; by the time the desktop session starts the driver is stable.
+amixer -c seeed2micvoicec cset numid=13 122,122 -q 2>/dev/null || true
+
 # Hide the mouse cursor
 unclutter --timeout 1 &
 

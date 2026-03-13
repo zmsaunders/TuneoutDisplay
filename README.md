@@ -2,6 +2,10 @@
 
 A countertop smart display built on Raspberry Pi with a Home Assistant kiosk, always-on wake word detection, voice pipeline, Music Assistant playback, and full HA device integration via MQTT.
 
+## Full Disclosure
+
+This is a project I work on in the evenings, and the initial build and scripting was created in conjunction with Claude AI. I make no guarantees or warranties, and suggest you read through the code base if you aren't comfortable executing code written by an AI agent. I've made every effort to review it and guide it, but as a side project my biggest concern was having something functional and re-usable. I am 100% open to any pull requests or changes anyone wants to submit.
+
 ---
 
 ## Hardware
@@ -208,3 +212,8 @@ ALC (Automatic Level Control) holds the mic level up, preventing HA from detecti
 **Touch scrolling not working**
 Check the daemon is running: `systemctl status smart-display-touch-scroll`
 View logs: `journalctl -u smart-display-touch-scroll -f`
+
+
+# License
+
+> This project is licensed under the terms of the GNU General Public License v3.0. See the LICENSE.txt file for details.
