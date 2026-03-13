@@ -383,6 +383,12 @@ fi
 
 info "Running LVA setup (downloads wake word models — may take a few minutes)..."
 chmod +x "$LVA_DIR/docker-entrypoint.sh"
+
+# Stop the service before rebuilding the venv — if LVA is already running it
+# holds the venv Python binary open, causing "Text file busy" when setup tries
+# to overwrite it.
+sudo systemctl stop linux-voice-assistant 2>/dev/null || true
+
 cd "$LVA_DIR"
 # Pi 4B: -j2 is safe.  Change to -j1 for Pi Zero / Pi 3.
 script/setup --cxxflags="-O1 -g0" --makeflags="-j2"
