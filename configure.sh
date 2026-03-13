@@ -12,6 +12,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# Resolve the directory containing this script NOW, before any cd commands
+# change the working directory.  BASH_SOURCE[0] may be a relative path (e.g.
+# "./configure.sh"), so we must evaluate it while the cwd is still correct.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ── Colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
@@ -53,12 +58,10 @@ if ! command -v raspi-config &>/dev/null; then
 fi
 
 # Check that the companion Python scripts are present alongside configure.sh.
-# These must be in the same directory (or the current working directory) at
-# run time.  If any are missing the most likely fix is: cd ~/TunoutDisplay && git pull
-_SCRIPT_DIR_PRE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SCRIPT_DIR is resolved at the top of the script before any cd commands.
 _MISSING_FILES=()
 for _f in stop-server.py mqtt-bridge.py touch-scroll.py; do
-    if [ ! -f "$_SCRIPT_DIR_PRE/$_f" ] && [ ! -f "$(pwd)/$_f" ]; then
+    if [ ! -f "$SCRIPT_DIR/$_f" ]; then
         _MISSING_FILES+=("$_f")
     fi
 done
@@ -77,7 +80,7 @@ if [ ${#_MISSING_FILES[@]} -gt 0 ]; then
     echo "  skipped.  Run configure.sh again after pulling to set them up."
     echo ""
 fi
-unset _MISSING_FILES _SCRIPT_DIR_PRE _f
+unset _MISSING_FILES _f
 
 success "Preflight OK."
 
@@ -642,11 +645,6 @@ section "TTS Stop Server"
 
 STOP_SCRIPT="$CURRENT_HOME/stop-server.py"
 info "Installing stop-server.py..."
-# BASH_SOURCE[0] is the path of this file regardless of how the script is
-# invoked (bash ./configure.sh, bash ~/TunoutDisplay/configure.sh, etc.).
-# $0 can be unreliable when the script is run via 'bash <path>' from a
-# different working directory.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _src=""
 for _loc in "$SCRIPT_DIR/stop-server.py" "$(pwd)/stop-server.py"; do
     [ -f "$_loc" ] && _src="$_loc" && break
