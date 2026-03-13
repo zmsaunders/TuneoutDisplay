@@ -51,6 +51,34 @@ info "User: $CURRENT_USER (UID $USER_ID)  |  Home: $CURRENT_HOME"
 if ! command -v raspi-config &>/dev/null; then
     warn "raspi-config not found — this may not be a Raspberry Pi OS install."
 fi
+
+# Check that the companion Python scripts are present alongside configure.sh.
+# These must be in the same directory (or the current working directory) at
+# run time.  If any are missing the most likely fix is: cd ~/TunoutDisplay && git pull
+_SCRIPT_DIR_PRE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_MISSING_FILES=()
+for _f in stop-server.py mqtt-bridge.py touch-scroll.py; do
+    if [ ! -f "$_SCRIPT_DIR_PRE/$_f" ] && [ ! -f "$(pwd)/$_f" ]; then
+        _MISSING_FILES+=("$_f")
+    fi
+done
+if [ ${#_MISSING_FILES[@]} -gt 0 ]; then
+    warn "The following companion scripts were not found next to configure.sh:"
+    for _f in "${_MISSING_FILES[@]}"; do
+        echo "      ✘  $_f"
+    done
+    echo ""
+    echo "  These files must be in the same directory as configure.sh."
+    echo "  If you cloned the repo, make sure you have the latest version:"
+    echo ""
+    echo "    cd ~/TunoutDisplay && git pull"
+    echo ""
+    echo "  The script will continue but the corresponding services will be"
+    echo "  skipped.  Run configure.sh again after pulling to set them up."
+    echo ""
+fi
+unset _MISSING_FILES _SCRIPT_DIR_PRE _f
+
 success "Preflight OK."
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -614,7 +642,11 @@ section "TTS Stop Server"
 
 STOP_SCRIPT="$CURRENT_HOME/stop-server.py"
 info "Installing stop-server.py..."
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# BASH_SOURCE[0] is the path of this file regardless of how the script is
+# invoked (bash ./configure.sh, bash ~/TunoutDisplay/configure.sh, etc.).
+# $0 can be unreliable when the script is run via 'bash <path>' from a
+# different working directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _src=""
 for _loc in "$SCRIPT_DIR/stop-server.py" "$(pwd)/stop-server.py"; do
     [ -f "$_loc" ] && _src="$_loc" && break
