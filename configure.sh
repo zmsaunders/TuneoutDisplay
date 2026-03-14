@@ -1,6 +1,6 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Smart Display Configuration Script
+# TuneoutDisplay Configuration Script
 # Tested on: Raspberry Pi OS 64-bit (Trixie), kernel 6.12.x
 # Hardware:  Raspberry Pi 4B + ReSpeaker 2-Mic Pi HAT (WM8960)
 #
@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
+BLUE='\033[0;34m'; MAGENTA='\033[1;35m'; BOLD='\033[1m'; NC='\033[0m'
 
 info()    { echo -e "${BLUE}▶${NC}  $1"; }
 success() { echo -e "${GREEN}✔${NC}  $1"; }
@@ -29,14 +29,14 @@ section() { echo -e "\n${BOLD}${BLUE}━━━  $1  ━━━${NC}\n"; }
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 clear
-echo -e "${BOLD}${BLUE}"
+echo -e "${MAGENTA}"
 cat << 'EOF'
-  ____                       _     ____  _           _
- / ___| _ __ ___   __ _ _ __| |_  |  _ \(_)___ _ __ | | __ _ _   _
- \___ \| '_ ` _ \ / _` | '__| __| | | | | / __| '_ \| |/ _` | | | |
-  ___) | | | | | | (_| | |  | |_  | |_| | \__ \ |_) | | (_| | |_| |
- |____/|_| |_| |_|\__,_|_|   \__| |____/|_|___/ .__/|_|\__,_|\__, |
-                                               |_|             |___/
+ _____   _   _   _   _   _____    ___    _   _   _____
+|_   _| | | | | | \ | | | ____|  / _ \  | | | | |_   _|
+{  | |   | | | | |  \| | |  _|   | | | | | | | |   | |  }
+   | |   | |_| | | |\  | | |___  | |_| | | |_| |   | |
+   |_|    \___/  |_| \_| |_____|  \___/   \___/    |_|
+                      · Display ·
 EOF
 echo -e "${NC}"
 echo -e "  Hardware : ${BOLD}Raspberry Pi 4B + ReSpeaker 2-Mic HAT${NC}"
