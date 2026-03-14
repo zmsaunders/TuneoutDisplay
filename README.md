@@ -12,7 +12,7 @@ This is a project I work on in the evenings, and the initial build and scripting
 
 | Component | Details |
 |---|---|
-| SBC | Raspberry Pi 4B (2 GB RAM) |
+| SBC | Raspberry Pi 4B (1 or 2 GB RAM) |
 | Microphone / Audio | KEYESTUDIO ReSpeaker 2-Mic Pi HAT (WM8960 codec) |
 | Display | Raspberry Pi Official 7" DSI Touchscreen |
 | Speaker | 3W 8Ω |
