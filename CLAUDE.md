@@ -44,7 +44,6 @@ TuneoutDisplay/          ← repo name on Pi (note the 'e')
 | `linux-voice-assistant` | LVA voice pipeline (ESPHome protocol, OWW wake word) | user |
 | `sendspin` | Music Assistant native player (sendspin protocol) | user |
 | `smart-display-mqtt` | MQTT bridge — registers HA entities via discovery | user |
-| `smart-display-stop` | HTTP stop-TTS server on port 12345 | user |
 | `smart-display-audio-init` | Boot-time ALSA init — waits for card, applies codec settings | root (system) |
 | `smart-display-touch-scroll` | Touch→scroll daemon using uinput | root (system) |
 
@@ -122,7 +121,6 @@ The bridge registers all entities under device `DEVICE_ID` (derived from `DEVICE
 | `number` | `media_volume` | Music Assistant volume 0–100% | `amixer cset name="Media Volume"` |
 | `number` | `brightness` | Display backlight 0–100% | `/sys/class/backlight/10-0045/brightness` |
 | `number` | `mic_gain` | Mic sensitivity 0–100% | `amixer cset numid=1` (WM8960 Capture PGA, ALSA 0–63) |
-| `button` | `stop_tts` | Kill in-progress TTS aplay | `pkill -f aplay` |
 
 Brightness min values:
 - **MQTT entity min = 0** — allows automations to turn the display fully off
@@ -148,13 +146,13 @@ satellite_entity: assist_satellite.smart_display
 tts_volume_entity: number.smart_display_tts_volume
 media_volume_entity: number.smart_display_media_volume
 brightness_entity: number.smart_display_brightness
+mute_entity: switch.smart_display_mute   # optional — enables chip tap-to-mute
 mic_gain_entity: number.smart_display_mic_gain   # optional
-stop_entity: button.smart_display_stop_tts
 ```
 
 Features:
-- Status chip (Standby / Listening… / Responding…) — tap to stop TTS when active
-- Independent sliders for Assistant volume, Media volume, Brightness
+- Status chip (Standby / Listening… / Responding… / Muted) — tap to toggle mute on the ESPHome switch entity; muted state takes visual priority over pipeline state
+- Independent sliders for Assistant volume, Media volume, Brightness, Mic Sensitivity
 - Drag-lock: slider values don't update from HA state while the user is dragging
 - Brightness slider minimum is 5% (card-enforced, not entity-enforced)
 

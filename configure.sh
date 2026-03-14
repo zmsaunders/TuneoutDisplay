@@ -60,7 +60,7 @@ fi
 # Check that the companion Python scripts are present alongside configure.sh.
 # SCRIPT_DIR is resolved at the top of the script before any cd commands.
 _MISSING_FILES=()
-for _f in stop-server.py mqtt-bridge.py touch-scroll.py; do
+for _f in mqtt-bridge.py touch-scroll.py; do
     if [ ! -f "$SCRIPT_DIR/$_f" ]; then
         _MISSING_FILES+=("$_f")
     fi
@@ -125,8 +125,8 @@ fi
 
 echo ""
 echo "  ── MQTT (for HA device auto-discovery) ──"
-echo "  The MQTT bridge registers volume, brightness, and Stop TTS"
-echo "  directly in HA — no rest_command YAML needed."
+echo "  The MQTT bridge registers volume, brightness, and mic sensitivity"
+echo "  directly in HA — no extra YAML needed."
 echo ""
 
 _def="${MQTT_HOST:-homeassistant.local}"
@@ -697,7 +697,7 @@ success "Audio init service enabled — volume and ALC will be restored on every
 section "Backlight Permissions"
 
 # The DSI display backlight is owned by root. Grant the video group write access
-# so the stop-server can adjust brightness without sudo.
+# so the MQTT bridge can adjust brightness without sudo.
 # The kernel name "10-0045" is the I2C address of the display controller.
 info "Setting up backlight udev rule for display (10-0045)..."
 sudo tee /etc/udev/rules.d/99-backlight.rules > /dev/null << 'EOF'
@@ -706,61 +706,6 @@ EOF
 sudo usermod -a -G video "$CURRENT_USER"
 sudo udevadm control --reload-rules && sudo udevadm trigger
 success "Backlight permissions configured. (Takes effect on next login/reboot.)"
-
-# ── TTS Stop Server ───────────────────────────────────────────────────────────
-section "TTS Stop Server"
-
-STOP_SCRIPT="$CURRENT_HOME/stop-server.py"
-info "Installing stop-server.py..."
-_src=""
-for _loc in "$SCRIPT_DIR/stop-server.py" "$(pwd)/stop-server.py"; do
-    [ -f "$_loc" ] && _src="$_loc" && break
-done
-if [ -n "$_src" ]; then
-    cp "$_src" "$STOP_SCRIPT"
-else
-    warn "Could not find stop-server.py — skipping. Copy it manually to $STOP_SCRIPT"
-fi
-
-if [ -f "$STOP_SCRIPT" ]; then
-    chmod +x "$STOP_SCRIPT"
-
-    info "Creating smart-display-stop.service..."
-    sudo tee /etc/systemd/system/smart-display-stop.service > /dev/null << EOF
-[Unit]
-Description=Smart Display TTS Stop Server
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=simple
-User=$CURRENT_USER
-ExecStart=/usr/bin/python3 $STOP_SCRIPT
-WorkingDirectory=$CURRENT_HOME
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=default.target
-EOF
-
-    sudo systemctl daemon-reload
-    sudo systemctl enable smart-display-stop
-    sudo systemctl restart smart-display-stop
-    success "TTS stop server enabled and started on port 12345."
-    echo ""
-    HOST="$(hostname).local"
-    SLUG=$(echo "$DEVICE_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
-    warn "Add a single rest_command to Home Assistant for stopping TTS:"
-    echo ""
-    echo "    rest_command:"
-    echo "      stop_${SLUG}:"
-    echo "        url: \"http://${HOST}:12345/stop\""
-    echo "        method: GET"
-    echo ""
-    info "Volume, brightness, and Stop TTS entities are registered automatically"
-    info "via MQTT discovery — no additional YAML needed once the MQTT bridge starts."
-fi
 
 # ── sendspin (Music Assistant native player) ──────────────────────────────────
 section "sendspin (Music Assistant Native Player)"
@@ -1034,54 +979,34 @@ Verify under **Settings → Devices & Services → MQTT → __DEVICENAME__**:
 | `number.__DEVICEID___tts_volume` | Voice / TTS volume (0–100) |
 | `number.__DEVICEID___media_volume` | Music Assistant volume (0–100) |
 | `number.__DEVICEID___brightness` | Display brightness (0–100) |
-| `button.__DEVICEID___stop_tts` | Stop TTS / clear audio |
+| `number.__DEVICEID___mic_gain` | Mic sensitivity (0–100) |
 
 > **Note:** If entity IDs differ, check the actual names in HA under the device page.
 > HA may append `_2`, `_3` etc. on re-registrations.
 
 ---
 
-## 3. configuration.yaml
+## 3. Lovelace Control Card
 
-Add to `/config/configuration.yaml` and restart HA:
+Install `smart-display-card.js` as a Lovelace resource, then add a card:
 
 ```yaml
-rest_command:
-  stop___DEVICEID__:
-    url: "http://__HOSTNAME__.local:12345/stop"
-    method: GET
+type: custom:smart-display-card
+name: __DEVICENAME__
+satellite_entity: assist_satellite.__DEVICEID__
+tts_volume_entity: number.__DEVICEID___tts_volume
+media_volume_entity: number.__DEVICEID___media_volume
+brightness_entity: number.__DEVICEID___brightness
+mute_entity: switch.__DEVICEID___mute
+mic_gain_entity: number.__DEVICEID___mic_gain
 ```
+
+> The status chip in the card header shows the current pipeline state and
+> acts as a mute toggle — tap to mute, tap again to unmute.
 
 ---
 
-## 4. Lovelace Control Card
-
-In a Lovelace dashboard: **Edit → + Add Card → Manual**, paste:
-
-```yaml
-type: entities
-title: __DEVICENAME__
-entities:
-  - entity: number.__DEVICEID___tts_volume
-    name: Voice Volume
-    icon: mdi:microphone
-  - entity: number.__DEVICEID___media_volume
-    name: Media Volume
-    icon: mdi:music-note
-  - entity: number.__DEVICEID___brightness
-    name: Brightness
-    icon: mdi:brightness-6
-  - type: button
-    name: Stop TTS
-    icon: mdi:stop-circle
-    tap_action:
-      action: perform-action
-      perform_action: rest_command.stop___DEVICEID__
-```
-
----
-
-## 5. Automations
+## 4. Automations
 
 ### Dim display at night
 
@@ -1115,24 +1040,19 @@ automation:
           value: 100
 ```
 
-### Stop TTS when a media player starts (prevent overlap)
+### Mute display when away
 
 ```yaml
 automation:
-  - alias: "__DEVICENAME__ — Stop TTS on media start"
+  - alias: "__DEVICENAME__ — Mute when away"
     trigger:
       - platform: state
-        entity_id: media_player.__DEVICEID__  # verify entity in HA
-        to: "playing"
+        entity_id: zone.home
+        to: "0"
     action:
-      - action: rest_command.stop___DEVICEID__
-```
-
-### Stop TTS from any script or automation
-
-```yaml
-action:
-  - action: rest_command.stop___DEVICEID__
+      - action: switch.turn_on
+        target:
+          entity_id: switch.__DEVICEID___mute
 ```
 
 ---
@@ -1163,7 +1083,7 @@ aplay -D seeed_tts /usr/share/sounds/alsa/Front_Left.wav
 dkms status seeed-voicecard
 
 # Re-run configure script (idempotent — safe to run again to change settings)
-cd ~/TunoutDisplay && ./configure.sh
+cd ~/TuneoutDisplay && ./configure.sh
 ```
 READMEEOF
 

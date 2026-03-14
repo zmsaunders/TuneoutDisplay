@@ -24,24 +24,26 @@ This is a project I work on in the evenings, and the initial build and scripting
 ## Features
 
 - **HA Lovelace kiosk** — Chromium in kiosk mode, launches automatically after boot and waits for HA to be reachable before opening
-- **Wake word detection** — Wyoming openWakeWord (`hey_jarvis` by default, configurable)
-- **Voice pipeline** — Wyoming Satellite connects to HA's Assist pipeline; ALC is toggled during STT to prevent the mic from staying open
+- **Wake word detection** — OpenWakeWord via Linux Voice Assistant (`hey_jarvis` by default, configurable)
+- **Voice pipeline** — LVA connects to HA via the ESPHome integration; includes mute control directly from HA
 - **Music Assistant playback** — Sendspin native player; appears automatically in MA 2.7+
-- **MQTT auto-discovery** — Device registers itself in HA with Voice Volume, Media Volume, Brightness, and Stop TTS entities — no YAML needed
+- **MQTT auto-discovery** — Device registers itself in HA with Voice Volume, Media Volume, Brightness, and Mic Sensitivity entities — no YAML needed
 - **Touch scrolling** — Daemon translates touchscreen swipe gestures into scroll-wheel events for labwc/Wayland
 - **Independent volume channels** — TTS/voice and media are separate ALSA softvol streams, each with its own HA slider
+- **Per-device mic tuning** — Mic sensitivity is adjustable from HA, persists across reboots, useful for different room sizes and placements
 
 ---
 
 ## Repo Structure
 
 ```
-configure.sh              # Main setup script — run once on a fresh install
-stop-server.py            # Lightweight HTTP server (port 12345) for stopping TTS
+configure.sh              # Main setup script — run once on a fresh install (idempotent, re-runnable)
 mqtt-bridge.py            # MQTT auto-discovery bridge for HA device entities
 touch-scroll.py           # Touch-to-scroll daemon (uinput virtual device)
 lovelace/
   smart-display-card.js   # Custom Lovelace card (copy to HA /config/www/)
+ha-configuration.md       # Full HA config reference
+CLAUDE.md                 # Technical reference for AI-assisted development
 ```
 
 ---
@@ -53,7 +55,7 @@ lovelace/
 - Fresh **Raspberry Pi OS 64-bit (Trixie)** install
 - Pi connected to your network
 - Home Assistant running with:
-  - **Wyoming Protocol** integration installed
+  - **ESPHome** integration installed
   - **MQTT integration** (Mosquitto) installed and configured
   - **Music Assistant 2.7+** (optional, for Sendspin)
 
@@ -68,40 +70,44 @@ chmod +x configure.sh
 ./configure.sh
 ```
 
-The script will prompt you for:
+The script prompts you for:
 - Device name (used as the HA device name and Music Assistant player name)
 - Home Assistant URL
 - Wake word model name
 - Lovelace kiosk URL (optional — skip to set up kiosk manually later)
 - MQTT broker host, port, username, and password
 
-It then installs and configures everything automatically and offers to reboot when done.
+Settings are saved after the first run — re-running the script will pre-fill all prompts with your previous values, so you only need to change what's different.
 
-### 2. Add the Wyoming satellite to Home Assistant
+The script installs and configures everything automatically, then offers to reboot when done.
+
+### 2. Add the voice assistant to Home Assistant
 
 After reboot, in HA go to:
 
-**Settings → Devices & Services → Add Integration → Wyoming Protocol**
+**Settings → Devices & Services → Add Integration → ESPHome**
 
 | Field | Value |
 |---|---|
 | Host | `<hostname>.local` |
-| Port | `10700` |
+| Port | `6053` |
+
+Once added, open the device and click **"Set Up Voice Assistant"** to assign it to a voice pipeline (Whisper STT + Piper TTS recommended).
 
 ### 3. Verify MQTT device
 
-In HA go to **Settings → Devices & Services → MQTT** and look for your device name. It should appear automatically with four entities:
+In HA go to **Settings → Devices & Services → MQTT** and look for your device name. It should appear automatically with these entities:
 
 - Voice Volume (number)
 - Media Volume (number)
 - Brightness (number)
-- Stop TTS (button)
+- Mic Sensitivity (number)
 
 If it doesn't appear, check that MQTT discovery is enabled in the MQTT integration settings.
 
 ### 4. Add the Lovelace control card (optional)
 
-The custom card gives you volume, brightness, and voice status controls in any HA dashboard.
+The custom card gives you volume, brightness, voice status, and a mute toggle in any HA dashboard.
 
 1. Copy `lovelace/smart-display-card.js` to `/config/www/` on your HA instance
 2. In HA go to **Settings → Dashboards → ⋮ → Resources → Add**
@@ -111,15 +117,18 @@ The custom card gives you volume, brightness, and voice status controls in any H
 
 ```yaml
 type: custom:smart-display-card
-name: TuneoutDisplay
-satellite_entity: assist_satellite.YOUR_SATELLITE_ENTITY
+name: My Display
+satellite_entity: assist_satellite.YOUR_DEVICE
 tts_volume_entity: number.YOUR_DEVICE_tts_volume
 media_volume_entity: number.YOUR_DEVICE_media_volume
 brightness_entity: number.YOUR_DEVICE_brightness
-stop_entity: button.YOUR_DEVICE_stop_tts
+mute_entity: switch.YOUR_DEVICE_mute        # optional — enables chip tap-to-mute
+mic_gain_entity: number.YOUR_DEVICE_mic_gain  # optional
 ```
 
 Find your exact entity IDs under **Developer Tools → States** and search for your device name.
+
+The status chip in the card header shows the current pipeline state (Standby / Listening / Responding / Muted) and acts as a mute toggle when `mute_entity` is configured — tap to mute, tap again to unmute.
 
 ### 5. Add swipe navigation between dashboard views (optional)
 
@@ -133,23 +142,21 @@ All services are managed by systemd and start automatically on boot.
 
 | Service | Description |
 |---|---|
-| `wyoming-openwakeword` | Listens for wake word on port 10400 |
-| `wyoming-satellite` | Voice pipeline satellite on port 10700 |
+| `linux-voice-assistant` | Wake word detection and voice pipeline (ESPHome protocol) |
 | `sendspin` | Music Assistant native player |
 | `smart-display-audio-init` | Restores ALSA mixer state after seeed DKMS module loads |
-| `smart-display-stop` | HTTP server on port 12345 (`/stop`, `/tts-volume`, `/media-volume`, `/brightness`) |
 | `smart-display-mqtt` | MQTT bridge for HA auto-discovery |
 | `smart-display-touch-scroll` | Translates touchscreen swipe gestures into scroll-wheel events |
 
 Check all service status:
 ```bash
-sudo systemctl status wyoming-openwakeword wyoming-satellite sendspin \
-  smart-display-audio-init smart-display-stop smart-display-mqtt smart-display-touch-scroll
+sudo systemctl status linux-voice-assistant sendspin \
+  smart-display-audio-init smart-display-mqtt smart-display-touch-scroll
 ```
 
 Follow live voice pipeline logs:
 ```bash
-journalctl -u wyoming-satellite -f
+journalctl -u linux-voice-assistant -f
 ```
 
 ---
@@ -166,7 +173,7 @@ Hardware: WM8960 (seeed2micvoicec)
          ┌─┴─┐
    seeed_tts  seeed_media     ← softvol streams (independent volume controls)
        │           │
-  Wyoming TTS   Sendspin
+   LVA / mpv    Sendspin
   (voice/TTS)   (music)
 ```
 
@@ -174,13 +181,19 @@ Volume controls:
 - **TTS Volume** — `amixer -c seeed2micvoicec cset "name=TTS Volume" 80%`
 - **Media Volume** — `amixer -c seeed2micvoicec cset "name=Media Volume" 80%`
 
+> **Note:** `pipewire-alsa` must not be installed — it intercepts ALSA calls at the library level and prevents dmix from working. The setup script explicitly removes it. PipeWire is used only for microphone input.
+
 ---
 
 ## Customisation
 
 ### Wake word
 
-Change the wake word by editing `wyoming-openwakeword.service` and `wyoming-satellite.service` and replacing `hey_jarvis` with any model supported by openWakeWord (e.g. `ok_nabu`, `hey_mycroft`).
+Re-run `./configure.sh` and enter a different wake word model name at the prompt. Supported models include `hey_jarvis`, `ok_nabu`, `hey_mycroft`, and others from OpenWakeWord.
+
+### Mic sensitivity
+
+Adjust the **Mic Sensitivity** slider in HA (the MQTT entity). Higher values boost the microphone preamplifier, improving far-field wake word detection. The value persists across reboots. Default is 63% (0 dB on the WM8960 Capture PGA).
 
 ### Touch scroll speed
 
@@ -192,27 +205,36 @@ sudo systemctl restart smart-display-touch-scroll
 
 ### Kiosk URL
 
-Edit `~/.config/labwc/autostart` to change the URL Chromium opens on boot.
+Re-run `./configure.sh` and enter a new kiosk URL at the prompt, or edit `~/.config/labwc/autostart` directly.
 
 ---
 
 ## Troubleshooting
 
 **Audio settings don't persist after reboot**
-The seeed DKMS module loads after `alsa-restore` runs. The `smart-display-audio-init` service handles this — check its status and logs.
+The seeed DKMS module loads after `alsa-restore` runs. The `smart-display-audio-init` service handles this — check its status and logs. Speaker volume is also re-applied in `~/.config/labwc/autostart` as a safety net.
 
-**Voice pipeline stays in "Listening" state**
-ALC (Automatic Level Control) holds the mic level up, preventing HA from detecting end-of-speech. The ALC toggle via `--stt-start-command` / `--stt-stop-command` in the satellite service fixes this.
+**"No MCLK configured" in dmesg / aplay fails**
+The seeed-voicecard DKMS module was built for a different kernel than the one currently running (common after `apt full-upgrade`). Fix:
+```bash
+sudo dkms build -m seeed-voicecard -v 0.3 -k $(uname -r) --force
+sudo dkms install -m seeed-voicecard -v 0.3 -k $(uname -r) --force
+sudo reboot
+```
 
 **MQTT entities don't appear in HA**
 - Check credentials in `/etc/smart-display/mqtt.env`
 - Verify MQTT discovery is enabled in HA's MQTT integration settings
 - Check `journalctl -u smart-display-mqtt -f` for connection errors
 
+**Voice assistant not discovered by HA after reboot**
+Ensure the ESPHome integration is installed in HA and add the device via **Settings → Devices & Services → ESPHome** using `<hostname>.local` port `6053`.
+
 **Touch scrolling not working**
 Check the daemon is running: `systemctl status smart-display-touch-scroll`
 View logs: `journalctl -u smart-display-touch-scroll -f`
 
+---
 
 # License
 

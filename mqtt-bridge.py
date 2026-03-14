@@ -89,19 +89,6 @@ def _number(entity_id: str, name: str, icon: str,
         "optimistic":            False,
     }
 
-def _button(entity_id: str, name: str, icon: str) -> dict:
-    return {
-        "name":                  name,
-        "unique_id":             f"{DEVICE_ID}_{entity_id}",
-        "device":                DEVICE,
-        "command_topic":         command_topic(entity_id),
-        "icon":                  icon,
-        "availability_topic":    AVAIL_TOPIC,
-        "payload_available":     "online",
-        "payload_not_available": "offline",
-        "payload_press":         "PRESS",
-    }
-
 # All discovery registrations: (config_topic, payload)
 DISCOVERY = [
     (config_topic("number", "tts_volume"),
@@ -116,12 +103,10 @@ DISCOVERY = [
     (config_topic("number", "mic_gain"),
      _number("mic_gain",     "Mic Sensitivity", "mdi:microphone-settings")),
 
-    (config_topic("button", "stop_tts"),
-     _button("stop_tts",     "Stop TTS",     "mdi:stop")),
 ]
 
 COMMAND_TOPICS = {command_topic(e) for e in
-                  ("tts_volume", "media_volume", "brightness", "mic_gain", "stop_tts")}
+                  ("tts_volume", "media_volume", "brightness", "mic_gain")}
 
 # ── Hardware helpers ───────────────────────────────────────────────────────────
 def _read_state(path: Path, default: int) -> int:
@@ -187,9 +172,6 @@ def _set_brightness(level: int) -> None:
         (BACKLIGHT_DIR / "brightness").write_text(str(int(level * max_b / 100)))
     except OSError as e:
         print(f"[backlight] Error: {e}")
-
-def _stop_tts() -> None:
-    subprocess.run(["pkill", "-f", "aplay"], capture_output=True)
 
 # ── MQTT callbacks ─────────────────────────────────────────────────────────────
 def on_connect(client, userdata, connect_flags, reason_code, properties):
@@ -261,11 +243,6 @@ def on_message(client, userdata, msg):
         _write_state(MIC_GAIN_FILE, level)
         client.publish(state_topic("mic_gain"), str(level), retain=True)
         print(f"[mic-gain] → {level}% (ALSA {round(level * MIC_GAIN_ALSA_MAX / 100)})")
-
-    elif topic == command_topic("stop_tts"):
-        _stop_tts()
-        print("[stop] TTS interrupted via MQTT.")
-
 
 def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
     if reason_code.is_failure:

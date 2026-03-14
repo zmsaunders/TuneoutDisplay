@@ -4,12 +4,13 @@
  *
  * Config example:
  *   type: custom:smart-display-card
- *   name: Smart Display Alpha          # optional, defaults to "Smart Display"
- *   satellite_entity: assist_satellite.smart_display_alpha
+ *   name: Smart Display               # optional, defaults to "Smart Display"
+ *   satellite_entity: assist_satellite.smart_display
  *   tts_volume_entity: number.smart_display_tts_volume
  *   media_volume_entity: number.smart_display_media_volume
  *   brightness_entity: number.smart_display_brightness
- *   stop_entity: button.smart_display_stop_tts
+ *   mute_entity: switch.smart_display_mute   # optional — enables chip tap to mute
+ *   mic_gain_entity: number.smart_display_mic_gain   # optional
  */
 
 (() => {
@@ -50,7 +51,7 @@
         tts_volume_entity:   'number.smart_display_tts_volume',
         media_volume_entity: 'number.smart_display_media_volume',
         brightness_entity:   'number.smart_display_brightness',
-        stop_entity:         'button.smart_display_stop_tts',
+        mute_entity:         'switch.smart_display_mute',
       };
     }
 
@@ -117,9 +118,9 @@
     }
 
     _bindEvents() {
-      // Status chip → stop action
+      // Status chip → mute toggle
       this.shadowRoot.getElementById('chip')
-        .addEventListener('click', () => this._stopAction());
+        .addEventListener('click', () => this._chipAction());
 
       // TTS slider
       const ttsSlider = this.shadowRoot.getElementById('tts-slider');
@@ -178,17 +179,25 @@
       if (!this._built) return;
 
       // Status chip
-      const status   = this._status();
-      const isActive = status === 'listening' || status === 'responding';
+      const status = this._status();
 
-      const LABELS = { standby: 'Standby', listening: 'Listening…', responding: 'Responding…', unknown: 'Unknown' };
+      const LABELS = {
+        standby:   'Standby',
+        listening: 'Listening…',
+        responding:'Responding…',
+        muted:     'Muted',
+        unknown:   'Unknown',
+      };
       const COLORS = {
         standby:   'var(--secondary-text-color)',
-        listening: 'var(--success-color, #4CAF50)',
-        responding:'var(--info-color,    #03a9f4)',
-        unknown:   'var(--error-color,   #f44336)',
+        listening: 'var(--success-color,  #4CAF50)',
+        responding:'var(--info-color,     #03a9f4)',
+        muted:     'var(--warning-color,  #FF9800)',
+        unknown:   'var(--error-color,    #f44336)',
       };
-      const color = COLORS[status] ?? COLORS.unknown;
+      const color      = COLORS[status] ?? COLORS.unknown;
+      const canMute    = !!this._config.mute_entity;
+      const muteTitle  = status === 'muted' ? 'Tap to unmute' : 'Tap to mute';
 
       const chip  = this.shadowRoot.getElementById('chip');
       const dot   = this.shadowRoot.getElementById('dot');
@@ -197,10 +206,10 @@
       label.textContent        = LABELS[status] ?? status;
       chip.style.color         = color;
       chip.style.borderColor   = color;
-      chip.style.cursor        = isActive ? 'pointer' : 'default';
-      chip.title               = isActive ? 'Tap to stop' : '';
+      chip.style.cursor        = canMute ? 'pointer' : 'default';
+      chip.title               = canMute ? muteTitle : '';
       dot.style.background     = color;
-      dot.classList.toggle('pulse', status !== 'standby' && status !== 'unknown');
+      dot.classList.toggle('pulse', status !== 'standby' && status !== 'muted' && status !== 'unknown');
 
       // Sliders — only update if user is not currently dragging
       if (!this._ttsActive) {
@@ -231,10 +240,15 @@
     // ── Helpers ────────────────────────────────────────────────────────────
 
     _status() {
+      // Muted takes visual priority — show it regardless of pipeline state.
+      if (this._config.mute_entity) {
+        const muteState = this._hass?.states[this._config.mute_entity]?.state;
+        if (muteState === 'on') return 'muted';
+      }
       const state = this._hass?.states[this._config.satellite_entity]?.state;
       if (!state) return 'unknown';
-      if (state === 'idle')                           return 'standby';
-      if (state === 'listening')                      return 'listening';
+      if (state === 'idle')                                 return 'standby';
+      if (state === 'listening')                            return 'listening';
       if (state === 'processing' || state === 'responding') return 'responding';
       return 'unknown';
     }
@@ -243,12 +257,11 @@
       return parseFloat(this._hass?.states[entityId]?.state ?? fallback);
     }
 
-    _stopAction() {
-      const s = this._status();
-      if (s !== 'listening' && s !== 'responding') return;
-      if (this._config.stop_entity) {
-        this._hass.callService('button', 'press', { entity_id: this._config.stop_entity });
-      }
+    _chipAction() {
+      if (!this._config.mute_entity) return;
+      const isMuted  = this._hass?.states[this._config.mute_entity]?.state === 'on';
+      const service  = isMuted ? 'turn_off' : 'turn_on';
+      this._hass.callService('switch', service, { entity_id: this._config.mute_entity });
     }
 
     _setVolume(entityId, value) {
