@@ -74,7 +74,7 @@ if [ ${#_MISSING_FILES[@]} -gt 0 ]; then
     echo "  These files must be in the same directory as configure.sh."
     echo "  If you cloned the repo, make sure you have the latest version:"
     echo ""
-    echo "    cd ~/TunoutDisplay && git pull"
+    echo "    cd ~/TuneoutDisplay && git pull"
     echo ""
     echo "  The script will continue but the corresponding services will be"
     echo "  skipped.  Run configure.sh again after pulling to set them up."
@@ -518,9 +518,11 @@ fi
 
 # Seed default per-stream software volumes if state files don't exist yet.
 # TTS at 90%, media at 75% — voice slightly louder than music by default.
+# Mic gain at 63% — maps to ALSA value 40 (0 dB on the WM8960 Capture PGA).
 [ -f "$CURRENT_HOME/.smart-display-tts-volume"   ] || echo "90" > "$CURRENT_HOME/.smart-display-tts-volume"
 [ -f "$CURRENT_HOME/.smart-display-media-volume" ] || echo "75" > "$CURRENT_HOME/.smart-display-media-volume"
-success "Default stream volumes seeded (TTS: 90%, Media: 75%)."
+[ -f "$CURRENT_HOME/.smart-display-mic-gain"     ] || echo "63" > "$CURRENT_HOME/.smart-display-mic-gain"
+success "Default stream volumes seeded (TTS: 90%, Media: 75%, Mic: 63%)."
 
 # Persist all ALSA mixer settings so they survive reboot.
 # alsactl store writes to /var/lib/alsa/asound.state.
@@ -568,7 +570,19 @@ amixer -c seeed2micvoicec cset numid=13 122,122 -q 2>/dev/null || true
 amixer -c seeed2micvoicec cset numid=26 3     -q  # ALC Function → Stereo
 amixer -c seeed2micvoicec cset numid=28 11    -q  # ALC Target   → -6 dBFS
 amixer -c seeed2micvoicec cset numid=32 2     -q  # ALC Decay    → faster
-amixer -c seeed2micvoicec cset numid=1  40,40 -q  # Capture PGA headroom
+
+# Restore Capture PGA gain from state file if available; otherwise use the
+# default of ALSA value 40 (~63% of the 0–63 range, ≈ 0 dB on WM8960).
+# The MQTT bridge exposes this as the 'Mic Sensitivity' entity so each
+# device can be tuned for its acoustic environment from Home Assistant.
+MIC_GAIN_FILE="$CURRENT_HOME/.smart-display-mic-gain"
+if [ -f "\$MIC_GAIN_FILE" ]; then
+    _MIC_PCT=\$(cat "\$MIC_GAIN_FILE")
+    _MIC_ALSA=\$(( _MIC_PCT * 63 / 100 ))
+    amixer -c seeed2micvoicec cset numid=1 "\${_MIC_ALSA},\${_MIC_ALSA}" -q 2>/dev/null || true
+else
+    amixer -c seeed2micvoicec cset numid=1 40,40 -q 2>/dev/null || true
+fi
 
 # Restore per-stream software volumes from state files.
 # TTS Volume  → controls LVA/voice playback level (seeed_tts softvol device, used by mpv)

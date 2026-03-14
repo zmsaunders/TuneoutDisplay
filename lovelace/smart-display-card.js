@@ -23,6 +23,7 @@
       this._ttsActive        = false; // true while user is dragging TTS slider
       this._mediaActive      = false; // true while user is dragging Media slider
       this._brightnessActive = false; // true while user is dragging Brightness slider
+      this._micActive        = false; // true while user is dragging Mic Sensitivity slider
     }
 
     // ── Lovelace lifecycle ─────────────────────────────────────────────────
@@ -100,6 +101,14 @@
               <span class="vol-val" id="brightness-val">${Math.round(brightness)}%</span>
             </div>
 
+            ${this._config.mic_gain_entity ? `
+            <div class="slider-row">
+              <ha-icon icon="mdi:microphone-settings" title="Mic sensitivity"></ha-icon>
+              <span class="label">Mic Sensitivity</span>
+              <input type="range" id="mic-slider" min="0" max="100" value="${this._vol(this._config.mic_gain_entity, 63)}">
+              <span class="vol-val" id="mic-val">${Math.round(this._vol(this._config.mic_gain_entity, 63))}%</span>
+            </div>` : ''}
+
           </div>
         </ha-card>
       `;
@@ -147,6 +156,20 @@
         this._brightnessActive = false;
       });
       brightnessSlider.addEventListener('pointerup', () => { this._brightnessActive = false; });
+
+      // Mic Sensitivity slider (optional — only bound if entity is configured)
+      if (this._config.mic_gain_entity) {
+        const micSlider = this.shadowRoot.getElementById('mic-slider');
+        const micVal    = this.shadowRoot.getElementById('mic-val');
+
+        micSlider.addEventListener('pointerdown', () => { this._micActive = true; });
+        micSlider.addEventListener('input',  (e) => { micVal.textContent = e.target.value + '%'; });
+        micSlider.addEventListener('change', (e) => {
+          this._setVolume(this._config.mic_gain_entity, parseInt(e.target.value));
+          this._micActive = false;
+        });
+        micSlider.addEventListener('pointerup', () => { this._micActive = false; });
+      }
     }
 
     // ── Incremental updates (every hass change) ────────────────────────────
@@ -194,6 +217,14 @@
         const v = this._vol(this._config.brightness_entity, 80);
         this.shadowRoot.getElementById('brightness-slider').value = v;
         this.shadowRoot.getElementById('brightness-val').textContent = Math.round(v) + '%';
+      }
+      if (this._config.mic_gain_entity && !this._micActive) {
+        const v = this._vol(this._config.mic_gain_entity, 63);
+        const s = this.shadowRoot.getElementById('mic-slider');
+        if (s) {
+          s.value = v;
+          this.shadowRoot.getElementById('mic-val').textContent = Math.round(v) + '%';
+        }
       }
     }
 

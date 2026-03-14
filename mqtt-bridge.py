@@ -43,7 +43,12 @@ DEVICE_ID     = os.getenv("DEVICE_ID",
 HOME           = Path.home()
 TTS_VOL_FILE   = HOME / ".smart-display-tts-volume"
 MEDIA_VOL_FILE = HOME / ".smart-display-media-volume"
+MIC_GAIN_FILE  = HOME / ".smart-display-mic-gain"
 BACKLIGHT_DIR  = Path("/sys/class/backlight/10-0045")
+
+# WM8960 Capture PGA gain range (numid=1): ALSA values 0–63.
+# 0 = minimum gain (~-17 dB),  63 = maximum gain (+30 dB),  40 = 0 dB default.
+MIC_GAIN_ALSA_MAX = 63
 
 # ── MQTT topic helpers ─────────────────────────────────────────────────────────
 BASE = f"smart-display/{DEVICE_ID}"
@@ -108,12 +113,15 @@ DISCOVERY = [
     (config_topic("number", "brightness"),
      _number("brightness",   "Brightness",   "mdi:brightness-6", min_=0)),
 
+    (config_topic("number", "mic_gain"),
+     _number("mic_gain",     "Mic Sensitivity", "mdi:microphone-settings")),
+
     (config_topic("button", "stop_tts"),
      _button("stop_tts",     "Stop TTS",     "mdi:stop")),
 ]
 
 COMMAND_TOPICS = {command_topic(e) for e in
-                  ("tts_volume", "media_volume", "brightness", "stop_tts")}
+                  ("tts_volume", "media_volume", "brightness", "mic_gain", "stop_tts")}
 
 # ── Hardware helpers ───────────────────────────────────────────────────────────
 def _read_state(path: Path, default: int) -> int:
@@ -146,6 +154,33 @@ def _set_alsa(control: str, level: int) -> None:
     if r.returncode != 0:
         print(f"[alsa] Error setting '{control}': {r.stderr.strip()}")
 
+def _read_mic_gain_pct() -> int:
+    """Read current WM8960 Capture PGA gain and return as 0–100%."""
+    r = subprocess.run(
+        ["/usr/bin/amixer", "-c", "seeed2micvoicec", "cget", "numid=1"],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            if "values=" in line:
+                try:
+                    raw = int(line.split("values=")[1].split(",")[0].strip())
+                    return max(0, min(100, round(raw * 100 / MIC_GAIN_ALSA_MAX)))
+                except (ValueError, IndexError):
+                    pass
+    return _read_state(MIC_GAIN_FILE, 63)
+
+def _set_mic_gain(level_pct: int) -> None:
+    """Set WM8960 Capture PGA gain from 0–100% (maps to ALSA 0–63)."""
+    alsa_val = round(level_pct * MIC_GAIN_ALSA_MAX / 100)
+    r = subprocess.run(
+        ["/usr/bin/amixer", "-c", "seeed2micvoicec", "cset", "numid=1",
+         f"{alsa_val},{alsa_val}"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(f"[alsa] Error setting mic gain: {r.stderr.strip()}")
+
 def _set_brightness(level: int) -> None:
     try:
         max_b = int((BACKLIGHT_DIR / "max_brightness").read_text().strip())
@@ -175,6 +210,7 @@ def on_connect(client, userdata, connect_flags, reason_code, properties):
     client.publish(state_topic("tts_volume"),   str(_read_state(TTS_VOL_FILE,   90)), retain=True)
     client.publish(state_topic("media_volume"), str(_read_state(MEDIA_VOL_FILE, 75)), retain=True)
     client.publish(state_topic("brightness"),   str(_read_brightness_pct()),           retain=True)
+    client.publish(state_topic("mic_gain"),     str(_read_mic_gain_pct()),             retain=True)
 
     # Subscribe to all command topics
     for topic in COMMAND_TOPICS:
@@ -215,6 +251,16 @@ def on_message(client, userdata, msg):
         _set_brightness(level)
         client.publish(state_topic("brightness"), str(level), retain=True)
         print(f"[brightness] → {level}%")
+
+    elif topic == command_topic("mic_gain"):
+        try:
+            level = max(0, min(100, int(float(payload))))
+        except ValueError:
+            return
+        _set_mic_gain(level)
+        _write_state(MIC_GAIN_FILE, level)
+        client.publish(state_topic("mic_gain"), str(level), retain=True)
+        print(f"[mic-gain] → {level}% (ALSA {round(level * MIC_GAIN_ALSA_MAX / 100)})")
 
     elif topic == command_topic("stop_tts"):
         _stop_tts()
