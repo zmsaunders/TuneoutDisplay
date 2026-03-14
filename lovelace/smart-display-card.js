@@ -96,7 +96,7 @@
             <div class="slider-row">
               <ha-icon icon="mdi:brightness-6" title="Brightness"></ha-icon>
               <span class="label">Brightness</span>
-              <input type="range" id="brightness-slider" min="0" max="100" value="${brightness}">
+              <input type="range" id="brightness-slider" min="5" max="100" value="${brightness}">
               <span class="vol-val" id="brightness-val">${Math.round(brightness)}%</span>
             </div>
 

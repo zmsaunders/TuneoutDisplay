@@ -106,7 +106,7 @@ DISCOVERY = [
      _number("media_volume", "Media Volume", "mdi:music")),
 
     (config_topic("number", "brightness"),
-     _number("brightness",   "Brightness",   "mdi:brightness-6", min_=5)),
+     _number("brightness",   "Brightness",   "mdi:brightness-6", min_=0)),
 
     (config_topic("button", "stop_tts"),
      _button("stop_tts",     "Stop TTS",     "mdi:stop")),
@@ -132,7 +132,7 @@ def _read_brightness_pct() -> int:
     try:
         max_b    = int((BACKLIGHT_DIR / "max_brightness").read_text().strip())
         current  = int((BACKLIGHT_DIR / "brightness").read_text().strip())
-        return max(5, min(100, round(current * 100 / max_b)))
+        return max(0, min(100, round(current * 100 / max_b)))
     except OSError:
         return 100
 
@@ -209,7 +209,7 @@ def on_message(client, userdata, msg):
 
     elif topic == command_topic("brightness"):
         try:
-            level = max(5, min(100, int(float(payload))))
+            level = max(0, min(100, int(float(payload))))
         except ValueError:
             return
         _set_brightness(level)
