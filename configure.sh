@@ -87,41 +87,79 @@ success "Preflight OK."
 # ── Configuration ─────────────────────────────────────────────────────────────
 section "Configuration"
 
-echo "Enter values below. Press ENTER to accept the default shown in [brackets]."
-echo ""
+# Load saved settings from a previous run, if available.
+# All values can still be overridden interactively below.
+_SETTINGS_FILE="$CURRENT_HOME/.smart-display-settings"
+if [ -f "$_SETTINGS_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$_SETTINGS_FILE"
+    info "Loaded saved settings from $_SETTINGS_FILE — press ENTER to keep each value."
+    echo ""
+fi
 
-read -rp "  Device name              [Smart Display]: " DEVICE_NAME
-DEVICE_NAME="${DEVICE_NAME:-Smart Display}"
+# For each prompt, use the saved (or hardcoded) value as the default.
+# The bracket shows exactly what will be used if the user just presses ENTER.
 
-read -rp "  Home Assistant URL  [http://homeassistant.local:8123]: " HA_SERVER
-HA_SERVER="${HA_SERVER:-http://homeassistant.local:8123}"
+_def="${DEVICE_NAME:-Smart Display}"
+read -rp "  Device name              [${_def}]: " _in
+DEVICE_NAME="${_in:-${_def}}"
 
-read -rp "  Wake word model          [hey_jarvis]: " WAKE_WORD
-WAKE_WORD="${WAKE_WORD:-hey_jarvis}"
+_def="${HA_SERVER:-http://homeassistant.local:8123}"
+read -rp "  Home Assistant URL  [${_def}]: " _in
+HA_SERVER="${_in:-${_def}}"
 
-read -rp "  Lovelace kiosk URL (leave blank to skip kiosk setup): " KIOSK_URL
-KIOSK_URL="${KIOSK_URL:-}"
+_def="${WAKE_WORD:-hey_jarvis}"
+read -rp "  Wake word model          [${_def}]: " _in
+WAKE_WORD="${_in:-${_def}}"
+
+_def="${KIOSK_URL:-}"
+read -rp "  Lovelace kiosk URL       [${_def:-none}]: " _in
+# Accept an explicit blank entry ("") to clear a previously saved kiosk URL.
+# Pressing ENTER keeps the saved value; typing a space then ENTER also clears.
+if [ -z "$_in" ]; then
+    KIOSK_URL="${_def}"
+else
+    KIOSK_URL="${_in}"
+    [ "$KIOSK_URL" = "none" ] && KIOSK_URL=""
+fi
 
 echo ""
 echo "  ── MQTT (for HA device auto-discovery) ──"
 echo "  The MQTT bridge registers volume, brightness, and Stop TTS"
 echo "  directly in HA — no rest_command YAML needed."
 echo ""
-read -rp "  MQTT broker host    [homeassistant.local]: " MQTT_HOST
-MQTT_HOST="${MQTT_HOST:-homeassistant.local}"
 
-read -rp "  MQTT broker port    [1883]: " MQTT_PORT
-MQTT_PORT="${MQTT_PORT:-1883}"
+_def="${MQTT_HOST:-homeassistant.local}"
+read -rp "  MQTT broker host    [${_def}]: " _in
+MQTT_HOST="${_in:-${_def}}"
 
-read -rp "  MQTT username       (leave blank if none): " MQTT_USERNAME
-MQTT_USERNAME="${MQTT_USERNAME:-}"
+_def="${MQTT_PORT:-1883}"
+read -rp "  MQTT broker port    [${_def}]: " _in
+MQTT_PORT="${_in:-${_def}}"
+
+_def="${MQTT_USERNAME:-}"
+read -rp "  MQTT username       [${_def:-none}]: " _in
+if [ -z "$_in" ]; then
+    MQTT_USERNAME="${_def}"
+else
+    MQTT_USERNAME="${_in}"
+    [ "$MQTT_USERNAME" = "none" ] && MQTT_USERNAME=""
+fi
 
 if [ -n "$MQTT_USERNAME" ]; then
-    read -rsp "  MQTT password: " MQTT_PASSWORD
-    echo ""
+    if [ -n "${MQTT_PASSWORD:-}" ]; then
+        read -rsp "  MQTT password       (press ENTER to keep saved): " _in
+        echo ""
+        MQTT_PASSWORD="${_in:-$MQTT_PASSWORD}"
+    else
+        read -rsp "  MQTT password: " MQTT_PASSWORD
+        echo ""
+    fi
 else
     MQTT_PASSWORD=""
 fi
+
+unset _def _in
 
 echo ""
 echo -e "  ${BOLD}Summary${NC}"
@@ -138,6 +176,21 @@ echo ""
 read -rp "Proceed with configuration? [Y/n] " CONFIRM
 CONFIRM="${CONFIRM:-Y}"
 [[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+
+# Save settings for the next run.  Password is included so re-runs don't
+# need it re-entered, but the file is mode 600 so only this user can read it.
+cat > "$_SETTINGS_FILE" << SAVEEOF
+DEVICE_NAME="$DEVICE_NAME"
+HA_SERVER="$HA_SERVER"
+WAKE_WORD="$WAKE_WORD"
+KIOSK_URL="$KIOSK_URL"
+MQTT_HOST="$MQTT_HOST"
+MQTT_PORT="$MQTT_PORT"
+MQTT_USERNAME="$MQTT_USERNAME"
+MQTT_PASSWORD="$MQTT_PASSWORD"
+SAVEEOF
+chmod 600 "$_SETTINGS_FILE"
+unset _SETTINGS_FILE
 
 # Derived identifiers — used throughout the script and in the generated README.
 DEVICE_ID=$(echo "$DEVICE_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd 'a-z0-9_')
