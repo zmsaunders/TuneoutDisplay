@@ -562,7 +562,7 @@ section "Speaker Volume"
 # the volume button service.
 if amixer -c seeed2micvoicec controls 2>/dev/null | grep -qi "speaker"; then
     info "Setting WM8960 hardware speaker to 94% (fixed master level)..."
-    amixer -c seeed2micvoicec sset 'Speaker' 94% -q
+    amixer -c seeed2micvoicec cset numid=13 127,127 -q
     success "Hardware speaker level set."
 else
     warn "Could not find Speaker control on seeed2micvoicec — skipping (card not loaded yet)."
@@ -616,7 +616,7 @@ done
 # This must be re-applied every boot because alsactl restore can be beaten by the
 # driver resetting codec registers after enumeration.  Keeping it here rather than
 # in asound.state makes the intent explicit and self-documenting.
-amixer -c seeed2micvoicec cset numid=13 122,122 -q 2>/dev/null || true
+amixer -c seeed2micvoicec cset numid=13 127,127 -q 2>/dev/null || true
 
 # Re-apply ALC settings explicitly. Enumerated controls (type=ENUMERATED) are
 # not reliably restored by alsactl on all kernel/driver versions.
@@ -902,7 +902,7 @@ pkill wfbar || true
 # This runs here in addition to smart-display-audio-init.service because the
 # audio-init service fires early in boot before the codec registers have fully
 # settled; by the time the desktop session starts the driver is stable.
-amixer -c seeed2micvoicec cset numid=13 122,122 -q 2>/dev/null || true
+amixer -c seeed2micvoicec cset numid=13 127,127 -q 2>/dev/null || true
 
 # Hide the mouse cursor
 unclutter --timeout 1 &
