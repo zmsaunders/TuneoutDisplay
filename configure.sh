@@ -570,12 +570,12 @@ else
 fi
 
 # Seed default per-stream software volumes if state files don't exist yet.
-# TTS at 90%, media at 75% — voice slightly louder than music by default.
+# TTS at 100%, media at 90% — voice slightly louder than music by default.
 # Mic gain at 63% — maps to ALSA value 40 (0 dB on the WM8960 Capture PGA).
-[ -f "$CURRENT_HOME/.smart-display-tts-volume"   ] || echo "90" > "$CURRENT_HOME/.smart-display-tts-volume"
-[ -f "$CURRENT_HOME/.smart-display-media-volume" ] || echo "75" > "$CURRENT_HOME/.smart-display-media-volume"
+[ -f "$CURRENT_HOME/.smart-display-tts-volume"   ] || echo "100" > "$CURRENT_HOME/.smart-display-tts-volume"
+[ -f "$CURRENT_HOME/.smart-display-media-volume" ] || echo "90" > "$CURRENT_HOME/.smart-display-media-volume"
 [ -f "$CURRENT_HOME/.smart-display-mic-gain"     ] || echo "63" > "$CURRENT_HOME/.smart-display-mic-gain"
-success "Default stream volumes seeded (TTS: 90%, Media: 75%, Mic: 63%)."
+success "Default stream volumes seeded (TTS: 100%, Media: 90%, Mic: 63%)."
 
 # Persist all ALSA mixer settings so they survive reboot.
 # alsactl store writes to /var/lib/alsa/asound.state.
