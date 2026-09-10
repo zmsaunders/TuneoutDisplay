@@ -317,6 +317,15 @@ sudo apt install -y \
 # Explicitly remove pipewire-alsa in case it was already installed (e.g. as
 # a leftover from a previous run or pulled in by an unrelated package).
 sudo apt remove --purge -y pipewire-alsa 2>/dev/null || true
+
+# apt's python3-paho-mqtt is commonly pinned below 2.0 on Debian, but
+# mqtt-bridge.py uses mqtt.CallbackAPIVersion (added in paho-mqtt 2.0+).
+# On the apt-provided version this crashes on every startup with:
+#   AttributeError: module 'paho.mqtt.client' has no attribute 'CallbackAPIVersion'
+# Force a pip-installed 2.x+ over the system package to fix this. Idempotent --
+# safe to run even if already upgraded.
+info "Ensuring paho-mqtt is 2.0+ (required by mqtt-bridge.py)..."
+sudo pip install --upgrade paho-mqtt --break-system-packages -q
 success "Dependencies installed."
 
 # ── ReSpeaker 2-Mic HAT Driver ────────────────────────────────────────────────
@@ -718,11 +727,11 @@ done
 # Restore the full ALSA mixer state saved by 'alsactl store'.
 /usr/sbin/alsactl restore 2>/dev/null || true
 
-# Set WM8960 hardware speaker to 0 dB (numid=13, value=122 on the 0–127 / -121dB scale).
+# Set WM8960 hardware speaker to true max (numid=13, value=127 on the 0–127 / -121dB scale).
 # This must be re-applied every boot because alsactl restore can be beaten by the
 # driver resetting codec registers after enumeration.  Keeping it here rather than
 # in asound.state makes the intent explicit and self-documenting.
-amixer -c seeed2micvoicec cset numid=13 122,122 -q 2>/dev/null || true
+amixer -c seeed2micvoicec cset numid=13 127,127 -q 2>/dev/null || true
 
 # Re-apply ALC settings explicitly. Enumerated controls (type=ENUMERATED) are
 # not reliably restored by alsactl on all kernel/driver versions.
@@ -822,15 +831,44 @@ if [ "$MUSIC_PLAYER" = "music-assistant" ] || [ "$MUSIC_PLAYER" = "both" ]; then
     # The MA server-side provider is always enabled — no configuration needed in MA.
     # The client auto-discovers the MA server via mDNS and registers itself by name.
     # Note: Sendspin is currently in technical preview.
+    #
+    # sendspin requires Python 3.12+, but this kernel-pinned OS image's system
+    # Python may be older (e.g. Bookworm-era 3.11) -- so rather than depend on
+    # `python3 -m venv` using whatever the OS ships, bootstrap an isolated
+    # Python 3.12 via 'uv' (a standalone Python version manager) and build the
+    # venv from that specific interpreter. This doesn't touch or replace the
+    # system python3 at all -- it's a separate, self-contained runtime used
+    # only for this venv.
 
     info "Installing sendspin dependency (libportaudio2)..."
     sudo apt install -y libportaudio2
 
+    info "Ensuring an isolated Python 3.12 runtime is available via uv..."
+    if ! command -v uv &>/dev/null; then
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$CURRENT_HOME/.local/bin:$PATH"
+    fi
+    uv python install 3.12
+    PY312="$(uv python find 3.12)"
+    info "Using Python 3.12 at: $PY312"
+
     # Install into an isolated venv to avoid conflicts with Debian system packages
     # (sendspin depends on typing_extensions which Debian also owns via apt)
-    info "Installing sendspin into /opt/sendspin venv..."
-    [ -d /opt/sendspin ] || sudo python3 -m venv /opt/sendspin
+    info "Installing sendspin into /opt/sendspin venv (Python 3.12)..."
+    sudo rm -rf /opt/sendspin
+    sudo "$PY312" -m venv /opt/sendspin
     sudo /opt/sendspin/bin/pip install --upgrade sendspin -q
+
+    # sendspin's own dependency pin on aiosendspin can lag behind what the
+    # Music Assistant server's protocol actually sends -- this showed up as
+    # repeated "mashumaro.exceptions.InvalidFieldValue" errors parsing
+    # server/state messages (e.g. new command names like 'unshuffle',
+    # 'repeat_off' the older aiosendspin didn't know about), which in turn
+    # meant volume/state changes from the MA UI never reached the client.
+    # Force aiosendspin to its own latest explicitly, on top of whatever
+    # sendspin's install pulled in.
+    info "Ensuring aiosendspin is current (protocol compatibility with MA server)..."
+    sudo /opt/sendspin/bin/pip install --upgrade aiosendspin -q
 
     info "Creating sendspin.service..."
     sudo tee /etc/systemd/system/sendspin.service > /dev/null << EOF
@@ -1110,11 +1148,11 @@ if [ -n "$KIOSK_URL" ]; then
 pkill lxpanel || true
 pkill wfbar || true
 
-# Re-apply WM8960 hardware speaker level (0 dB = numid=13 value 122).
+# Re-apply WM8960 hardware speaker level (true max = numid=13 value 127).
 # This runs here in addition to smart-display-audio-init.service because the
 # audio-init service fires early in boot before the codec registers have fully
 # settled; by the time the desktop session starts the driver is stable.
-amixer -c seeed2micvoicec cset numid=13 122,122 -q 2>/dev/null || true
+amixer -c seeed2micvoicec cset numid=13 127,127 -q 2>/dev/null || true
 
 # Hide the mouse cursor
 unclutter --timeout 1 &
