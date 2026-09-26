@@ -1,6 +1,6 @@
 # TuneoutDisplay
 
-A countertop smart display built on Raspberry Pi with a Home Assistant kiosk, always-on wake word detection, voice pipeline, Music Assistant playback, and full HA device integration via MQTT.
+A countertop smart display built on Raspberry Pi with a Home Assistant kiosk, always-on wake word detection, voice pipeline, a choice of music backends (Music Assistant and/or Caldera), and full HA device integration via MQTT.
 
 ## Full Disclosure
 
@@ -26,8 +26,9 @@ This is a project I work on in the evenings, and the initial build and scripting
 - **HA Lovelace kiosk** — Chromium in kiosk mode, launches automatically after boot and waits for HA to be reachable before opening
 - **Wake word detection** — OpenWakeWord via Linux Voice Assistant (`hey_jarvis` by default, configurable)
 - **Voice pipeline** — LVA connects to HA via the ESPHome integration; includes mute control directly from HA
-- **Music Assistant playback** — Sendspin native player; appears automatically in MA 2.7+
-- **MQTT auto-discovery** — Device registers itself in HA with Voice Volume, Media Volume, Brightness, and Mic Sensitivity entities — no YAML needed
+- **Choice of music backend** — install Music Assistant (Sendspin native player, appears automatically in MA 2.7+), Caldera headless (Plex-controlled), or both as independent players
+- **MQTT dashboard refresh** — reload the kiosk page or navigate it to any URL over MQTT; recovers displays after an HA reboot and doubles as a way to push test dashboards
+- **MQTT auto-discovery** — Device registers itself in HA with Voice Volume, Media Volume, Brightness, Mic Sensitivity, a Reload Dashboard button, and a Dashboard URL text box — no YAML needed
 - **Touch scrolling** — Daemon translates touchscreen swipe gestures into scroll-wheel events for labwc/Wayland
 - **Independent volume channels** — TTS/voice and media are separate ALSA softvol streams, each with its own HA slider
 - **Per-device mic tuning** — Mic sensitivity is adjustable from HA, persists across reboots, useful for different room sizes and placements
@@ -57,7 +58,8 @@ CLAUDE.md                 # Technical reference for AI-assisted development
 - Home Assistant running with:
   - **ESPHome** integration installed
   - **MQTT integration** (Mosquitto) installed and configured
-  - **Music Assistant 2.7+** (optional, for Sendspin)
+  - **Music Assistant 2.7+** (optional, for the Sendspin player)
+  - **Plex** account + a reachable Plex Media Server (optional, for the Caldera player)
 
 ### 1. Run the configuration script
 
@@ -74,12 +76,41 @@ The script prompts you for:
 - Device name (used as the HA device name and Music Assistant player name)
 - Home Assistant URL
 - Wake word model name
+- **Music player** — `music-assistant`, `caldera`, or `both`
+- Caldera ALSA output device (only if Caldera is selected — defaults to `seeed_media`)
 - Lovelace kiosk URL (optional — skip to set up kiosk manually later)
 - MQTT broker host, port, username, and password
 
 Settings are saved after the first run — re-running the script will pre-fill all prompts with your previous values, so you only need to change what's different.
 
 The script installs and configures everything automatically, then offers to reboot when done.
+
+### Kernel is pinned to 6.12
+
+The ReSpeaker driver (`seeed-voicecard`) is an out-of-tree DKMS module that breaks
+on newer kernels — 6.18 changed several ASoC APIs and will fail the build mid-upgrade,
+leaving `apt` half-broken. To keep every display identical and reproducible,
+`configure.sh` holds the kernel at the current **6.12** series before upgrading, so
+re-running the script is always safe. Userspace still gets updates; only the kernel
+is frozen.
+
+This assumes you flash displays from a 6.12-era Raspberry Pi OS image. If a device
+has already moved to a newer kernel, re-image it to bring it back to the standard
+state — an in-place downgrade isn't reliable on Raspberry Pi. To move the whole fleet
+forward later, validate the driver on the new kernel on one device first, then lift
+the hold (`sudo apt-mark unhold linux-image-rpi-v8 …`).
+
+### Music player notes
+
+- **Music Assistant (Sendspin)** needs no extra steps — the player appears in MA 2.7+ automatically and routes through the `seeed_media` softvol device.
+- **Caldera** requires two manual steps the script can't automate, printed at the end of its install section:
+
+  ```bash
+  ~/caldera-music/caldera-music --login          # one-time Plex device login
+  systemctl --user enable --now caldera-music    # start it after logging in
+  ```
+
+  Because Caldera's ALSA-device selection couldn't be verified, the build forces its audio onto your chosen device (default `seeed_media`) via `ALSA_CONFIG_PATH` so it shares the dmix path with voice/TTS. **Verify after first play:** start Plexamp audio and confirm voice/TTS still works simultaneously. If Caldera seizes the card alone, check for a native output-device setting in its config and point it at `seeed_media`. Caldera also self-updates in the background, so its version is not pinned by this build.
 
 ### 2. Add the voice assistant to Home Assistant
 
@@ -102,6 +133,8 @@ In HA go to **Settings → Devices & Services → MQTT** and look for your devic
 - Media Volume (number)
 - Brightness (number)
 - Mic Sensitivity (number)
+- Reload Dashboard (button)
+- Dashboard URL (text)
 
 If it doesn't appear, check that MQTT discovery is enabled in the MQTT integration settings.
 
@@ -136,6 +169,57 @@ Install **Swipe Navigation** from HACS (Frontend section), then add `/hacsfiles/
 
 ---
 
+## Dashboard refresh (MQTT)
+
+The kiosk Chromium launches with `--remote-debugging-port=9222`, and the MQTT
+bridge drives it over the Chrome DevTools Protocol. This lets you reload the page
+or send it to a new URL without unplugging anything — the original reason being
+that displays lose their HA connection during an HA update and otherwise need a
+physical reboot.
+
+Two HA entities are created automatically: a **Reload Dashboard** button and a
+**Dashboard URL** text box. You can also publish to the raw command topic:
+
+```
+Topic:   smart-display/<device_id>/dashboard/set
+Payloads:
+  reload                      reload the current page (ignores cache)
+  home                        navigate back to the configured kiosk URL
+  http://homeassistant.local:8123/lovelace/test   navigate to any URL
+```
+
+Example with mosquitto_pub:
+
+```bash
+mosquitto_pub -h <broker> -u <user> -P <pass> \
+  -t 'smart-display/<device_id>/dashboard/set' -m reload
+```
+
+**Recovering automatically after an HA reboot.** If your broker is HA's Mosquitto
+add-on, it is also offline during the reboot, so the reload must fire *after* HA
+returns. Add an HA automation that reloads the displays on startup:
+
+```yaml
+automation:
+  - alias: "Reload smart displays after HA restart"
+    trigger:
+      - platform: homeassistant
+        event: start
+    action:
+      - delay: "00:00:30"          # give the frontend time to come up
+      - action: button.press
+        target:
+          entity_id: button.<device_id>_dashboard_reload
+```
+
+> The debugging port binds to localhost only, but the build adds
+> `--remote-allow-origins=*` so the local bridge can complete the WebSocket
+> handshake. Anyone with shell access to the Pi could drive the browser — fine
+> for a kiosk appliance on a trusted LAN, worth noting if your threat model is
+> stricter.
+
+---
+
 ## Services
 
 All services are managed by systemd and start automatically on boot.
@@ -143,9 +227,10 @@ All services are managed by systemd and start automatically on boot.
 | Service | Description |
 |---|---|
 | `linux-voice-assistant` | Wake word detection and voice pipeline (ESPHome protocol) |
-| `sendspin` | Music Assistant native player |
+| `sendspin` | Music Assistant native player (only if music player is `music-assistant`/`both`) |
+| `caldera-music` (user) | Caldera headless Plex player (only if music player is `caldera`/`both`; runs as a `--user` service) |
 | `smart-display-audio-init` | Restores ALSA mixer state after seeed DKMS module loads |
-| `smart-display-mqtt` | MQTT bridge for HA auto-discovery |
+| `smart-display-mqtt` | MQTT bridge for HA auto-discovery + dashboard refresh |
 | `smart-display-touch-scroll` | Translates touchscreen swipe gestures into scroll-wheel events |
 
 Check all service status:

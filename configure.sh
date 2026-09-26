@@ -27,6 +27,33 @@ warn()    { echo -e "${YELLOW}⚠${NC}  $1"; }
 err()     { echo -e "${RED}✘  ERROR:${NC} $1"; exit 1; }
 section() { echo -e "\n${BOLD}${BLUE}━━━  $1  ━━━${NC}\n"; }
 
+# ── seeed-voicecard source patches ─────────────────────────────────────────────
+# Apply kernel-API compatibility fixes to the seeed-voicecard DKMS source, IF it
+# is already unpacked in /usr/src. Each patch is grep-guarded, so this is safe to
+# call repeatedly. It is called BOTH before the system upgrade (so a newly
+# installed kernel's DKMS post-install hook builds cleanly instead of failing and
+# leaving dpkg half-configured) and again in the driver section for fresh installs.
+patch_seeed_source() {
+    local src="/usr/src/seeed-voicecard-0.3"
+    [ -d "$src" ] || return 0
+
+    # Kernel 6.x: snd_soc_pcm_runtime lost ->id (now reached via ->dai_link->id).
+    if grep -q "rtd->id" "$src/seeed-voicecard.c" 2>/dev/null; then
+        sudo sed -i 's/rtd->id/rtd->dai_link->id/g' "$src/seeed-voicecard.c"
+    fi
+
+    # Kernel 6.18: the legacy ASoC clock master/slave DAI-format macros
+    # (SND_SOC_DAIFMT_CB{M,S}_CF{M,S}) were removed in favour of provider/consumer
+    # naming. Pure rename — CBM/CBS → CBP/CBC, CFM/CFS → CFP/CFC.
+    if grep -rqE 'SND_SOC_DAIFMT_CB[MS]_CF[MS]' "$src" 2>/dev/null; then
+        sudo find "$src" -name '*.c' -exec sed -i \
+            -e 's/SND_SOC_DAIFMT_CBM_CFM/SND_SOC_DAIFMT_CBP_CFP/g' \
+            -e 's/SND_SOC_DAIFMT_CBS_CFM/SND_SOC_DAIFMT_CBC_CFP/g' \
+            -e 's/SND_SOC_DAIFMT_CBM_CFS/SND_SOC_DAIFMT_CBP_CFC/g' \
+            -e 's/SND_SOC_DAIFMT_CBS_CFS/SND_SOC_DAIFMT_CBC_CFC/g' {} +
+    fi
+}
+
 # ── Banner ────────────────────────────────────────────────────────────────────
 clear
 echo -e "${MAGENTA}"
@@ -124,6 +151,33 @@ else
 fi
 
 echo ""
+echo "  ── Music player ──"
+echo "  Choose the music backend(s) to install on this display:"
+echo "    music-assistant : sendspin native player (HA / Music Assistant control)"
+echo "    caldera         : Caldera headless (Plex-controlled, plays from your Plex)"
+echo "    both            : install both as independent players"
+echo ""
+_def="${MUSIC_PLAYER:-music-assistant}"
+while true; do
+    read -rp "  Music player [music-assistant/caldera/both] [${_def}]: " _in
+    MUSIC_PLAYER="${_in:-${_def}}"
+    case "$MUSIC_PLAYER" in
+        music-assistant|caldera|both) break ;;
+        *) warn "Enter one of: music-assistant, caldera, both" ;;
+    esac
+done
+
+# Caldera ALSA output device — only asked when Caldera is being installed.
+# Defaults to the shared seeed_media softvol device so Caldera plays through
+# dmix (coexisting with voice/TTS) instead of grabbing the WM8960 hardware
+# directly. See the Caldera section for how this is enforced and verified.
+if [ "$MUSIC_PLAYER" = "caldera" ] || [ "$MUSIC_PLAYER" = "both" ]; then
+    _def="${CALDERA_AUDIO_DEVICE:-seeed_media}"
+    read -rp "  Caldera ALSA output device [${_def}]: " _in
+    CALDERA_AUDIO_DEVICE="${_in:-${_def}}"
+fi
+
+echo ""
 echo "  ── MQTT (for HA device auto-discovery) ──"
 echo "  The MQTT bridge registers volume, brightness, and mic sensitivity"
 echo "  directly in HA — no extra YAML needed."
@@ -167,6 +221,7 @@ echo "  ┌───────────────────────
 printf  "  │  Device name  : %-38s│\n" "$DEVICE_NAME"
 printf  "  │  HA server    : %-38s│\n" "$HA_SERVER"
 printf  "  │  Wake word    : %-38s│\n" "$WAKE_WORD"
+printf  "  │  Music player : %-38s│\n" "$MUSIC_PLAYER"
 printf  "  │  Kiosk URL    : %-38s│\n" "$([ -n "$KIOSK_URL" ] && echo "${KIOSK_URL:0:38}" || echo "skipped")"
 printf  "  │  MQTT broker  : %-38s│\n" "${MQTT_HOST}:${MQTT_PORT}"
 printf  "  │  MQTT auth    : %-38s│\n" "$([ -n "$MQTT_USERNAME" ] && echo "yes (${MQTT_USERNAME})" || echo "none")"
@@ -183,6 +238,8 @@ cat > "$_SETTINGS_FILE" << SAVEEOF
 DEVICE_NAME="$DEVICE_NAME"
 HA_SERVER="$HA_SERVER"
 WAKE_WORD="$WAKE_WORD"
+MUSIC_PLAYER="$MUSIC_PLAYER"
+CALDERA_AUDIO_DEVICE="${CALDERA_AUDIO_DEVICE:-seeed_media}"
 KIOSK_URL="$KIOSK_URL"
 MQTT_HOST="$MQTT_HOST"
 MQTT_PORT="$MQTT_PORT"
@@ -199,11 +256,47 @@ DEVICE_HOSTNAME=$(hostname)
 # ── System Update ─────────────────────────────────────────────────────────────
 section "System Update"
 
+# ── Kernel policy: freeze on the proven 6.12 series ───────────────────────────
+# This appliance carries an out-of-tree DKMS audio driver (seeed-voicecard) that
+# breaks whenever a kernel changes the ASoC API — kernel 6.18 removed several
+# symbols the seeed codecs use and left dpkg half-configured mid-upgrade. To keep
+# every display in a known-good, reproducible state, we HOLD the kernel at its
+# current 6.12 version so 'apt full-upgrade' never advances it. Userspace still
+# gets security updates; the kernel only moves when you deliberately bump the pin
+# (after validating the driver on the new kernel on ONE device first).
+#
+# Assumption: displays are provisioned from a 6.12-era Raspberry Pi OS image. If a
+# device is already on a newer kernel (e.g. it slipped to 6.18), holding freezes
+# it THERE, not at 6.12 — re-image it to bring it back into the standard state.
+_RUNNING_KERNEL="$(uname -r)"
+case "$_RUNNING_KERNEL" in
+    6.12.*) success "Running proven kernel $_RUNNING_KERNEL." ; KERNEL_PINNED_OK=yes ;;
+    *)
+        KERNEL_PINNED_OK=no
+        warn "Running kernel is $_RUNNING_KERNEL — NOT the pinned 6.12 series."
+        warn "This display will not match the standard state. The clean fix is to"
+        warn "re-image it with a 6.12-based Raspberry Pi OS, then re-run this script."
+        warn "The seeed audio driver cannot build on this kernel, so this run will"
+        warn "SKIP the driver install/build to avoid removing a working module."
+        ;;
+esac
+
+info "Holding kernel packages (freeze at the current 6.12 series)..."
+sudo apt-mark hold linux-image-rpi-v8 linux-image-rpi-2712 \
+                   linux-headers-rpi-v8 linux-headers-rpi-2712 2>/dev/null || true
+success "Kernel held — full-upgrade will not change it."
+
+# Defensive: if a seeed source tree is already unpacked, patch it for known
+# kernel-API changes before upgrading. With the kernel held this is a no-op, but
+# it protects against the half-configured-dpkg trap if the hold is ever lifted.
+info "Pre-patching seeed-voicecard source for kernel API changes (if present)..."
+patch_seeed_source
+
 info "Updating package lists..."
 sudo apt update -qq
-info "Upgrading packages (this may take a few minutes)..."
+info "Upgrading packages (kernel held; this may take a few minutes)..."
 sudo apt full-upgrade -y -qq
-success "System up to date."
+success "System up to date (kernel pinned to 6.12)."
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 section "Installing Dependencies"
@@ -211,6 +304,7 @@ section "Installing Dependencies"
 info "Installing dependencies..."
 sudo apt install -y \
     git sox alsa-utils unclutter-xfixes python3-paho-mqtt python3-evdev \
+    python3-websocket \
     avahi-daemon avahi-utils \
     pipewire pipewire-bin pipewire-pulse wireplumber \
     libmpv-dev mpv libasound2-plugins pulseaudio-utils \
@@ -227,6 +321,17 @@ success "Dependencies installed."
 
 # ── ReSpeaker 2-Mic HAT Driver ────────────────────────────────────────────────
 section "ReSpeaker 2-Mic HAT Driver (seeed-voicecard)"
+
+# Guard: the seeed driver only builds on the pinned 6.12 kernel. On anything newer
+# (a device that slipped to 6.18), the seeed install.sh would destructively remove
+# the existing DKMS modules and then fail to rebuild — leaving the device with no
+# audio at all. Skip the whole section and tell the user to re-image instead.
+if [ "${KERNEL_PINNED_OK:-yes}" != "yes" ]; then
+    warn "Skipping seeed-voicecard driver setup — running kernel is $_RUNNING_KERNEL,"
+    warn "not the 6.12 series the driver supports. RE-IMAGE this device with a"
+    warn "6.12-based Raspberry Pi OS, then re-run ./configure.sh. Audio will not"
+    warn "work on this kernel until you do."
+else
 
 SEEED_DIR="$CURRENT_HOME/seeed-voicecard"
 
@@ -255,13 +360,12 @@ SEEED_SOURCE="/usr/src/seeed-voicecard-0.3/seeed-voicecard.c"
 if [ ! -f "$SEEED_SOURCE" ]; then
     warn "Could not find $SEEED_SOURCE — skipping DKMS patch/build."
 else
-    if grep -q "rtd->id" "$SEEED_SOURCE"; then
-        info "Applying kernel 6.x API patch (rtd->id → rtd->dai_link->id)..."
-        sudo sed -i 's/rtd->id/rtd->dai_link->id/g' "$SEEED_SOURCE"
-        success "Patch applied."
-    else
-        info "Patch already applied or not needed — skipping."
-    fi
+    # Apply all kernel-API compatibility patches (rtd->id for 6.x, ASoC DAIFMT
+    # clock-macro rename for 6.18+). Grep-guarded and idempotent — see
+    # patch_seeed_source() near the top of this script.
+    info "Applying kernel-API compatibility patches to seeed source..."
+    patch_seeed_source
+    success "Source patches applied (idempotent)."
 
     info "Building DKMS module for kernel $(uname -r)..."
     if sudo dkms build -m seeed-voicecard -v 0.3 --force 2>&1 | grep -q "Error"; then
@@ -296,6 +400,8 @@ if dkms status seeed-voicecard 2>/dev/null | grep -q "seeed-voicecard"; then
         success "seeed-voicecard DKMS module current for kernel $_RUNNING_KERNEL."
     fi
 fi
+
+fi  # end KERNEL_PINNED_OK guard for the seeed-voicecard driver section
 
 # ── Microphone Wrapper Script (diagnostic / fallback) ─────────────────────────
 section "Microphone Wrapper Script"
@@ -708,24 +814,26 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 success "Backlight permissions configured. (Takes effect on next login/reboot.)"
 
 # ── sendspin (Music Assistant native player) ──────────────────────────────────
-section "sendspin (Music Assistant Native Player)"
+# Installed only when the chosen music player is "music-assistant" or "both".
+if [ "$MUSIC_PLAYER" = "music-assistant" ] || [ "$MUSIC_PLAYER" = "both" ]; then
+    section "sendspin (Music Assistant Native Player)"
 
-# Sendspin is Music Assistant's own playback protocol (introduced in MA 2.7).
-# The MA server-side provider is always enabled — no configuration needed in MA.
-# The client auto-discovers the MA server via mDNS and registers itself by name.
-# Note: Sendspin is currently in technical preview.
+    # Sendspin is Music Assistant's own playback protocol (introduced in MA 2.7).
+    # The MA server-side provider is always enabled — no configuration needed in MA.
+    # The client auto-discovers the MA server via mDNS and registers itself by name.
+    # Note: Sendspin is currently in technical preview.
 
-info "Installing sendspin dependency (libportaudio2)..."
-sudo apt install -y libportaudio2
+    info "Installing sendspin dependency (libportaudio2)..."
+    sudo apt install -y libportaudio2
 
-# Install into an isolated venv to avoid conflicts with Debian system packages
-# (sendspin depends on typing_extensions which Debian also owns via apt)
-info "Installing sendspin into /opt/sendspin venv..."
-[ -d /opt/sendspin ] || sudo python3 -m venv /opt/sendspin
-sudo /opt/sendspin/bin/pip install --upgrade sendspin -q
+    # Install into an isolated venv to avoid conflicts with Debian system packages
+    # (sendspin depends on typing_extensions which Debian also owns via apt)
+    info "Installing sendspin into /opt/sendspin venv..."
+    [ -d /opt/sendspin ] || sudo python3 -m venv /opt/sendspin
+    sudo /opt/sendspin/bin/pip install --upgrade sendspin -q
 
-info "Creating sendspin.service..."
-sudo tee /etc/systemd/system/sendspin.service > /dev/null << EOF
+    info "Creating sendspin.service..."
+    sudo tee /etc/systemd/system/sendspin.service > /dev/null << EOF
 [Unit]
 Description=Sendspin Audio Player (Music Assistant)
 Wants=network-online.target smart-display-audio-init.service
@@ -742,11 +850,113 @@ RestartSec=5
 WantedBy=default.target
 EOF
 
-sudo systemctl daemon-reload
-sudo systemctl enable sendspin
-sudo systemctl restart sendspin
-success "sendspin running — '$DEVICE_NAME' will appear in Music Assistant automatically."
-warn "Requires Music Assistant 2.7 or later."
+    sudo systemctl daemon-reload
+    sudo systemctl enable sendspin
+    sudo systemctl restart sendspin
+    success "sendspin running — '$DEVICE_NAME' will appear in Music Assistant automatically."
+    warn "Requires Music Assistant 2.7 or later."
+else
+    # Caldera-only: make sure a previously-installed sendspin isn't left running
+    # (matters when re-running configure.sh to switch a device away from MA).
+    if systemctl list-unit-files 2>/dev/null | grep -q '^sendspin.service'; then
+        info "Music player is '$MUSIC_PLAYER' — disabling existing sendspin service..."
+        sudo systemctl disable --now sendspin 2>/dev/null || true
+        success "sendspin disabled."
+    fi
+fi
+
+# ── Caldera (headless Plex-powered player) ────────────────────────────────────
+# Installed only when the chosen music player is "caldera" or "both".
+if [ "$MUSIC_PLAYER" = "caldera" ] || [ "$MUSIC_PLAYER" = "both" ]; then
+    section "Caldera (Headless Plex Music Player)"
+
+    # Caldera Music headless is a Plex-controlled audio daemon for Linux that
+    # installs via an official script and runs as a 'systemctl --user' service
+    # that self-updates in the background. It is controlled from Plexamp / the
+    # Plex apps, NOT from Home Assistant — there is no MA provider involved.
+    #
+    # Two facts shape how we wire it in here:
+    #   1. It requires a one-time interactive Plex login that cannot be scripted.
+    #   2. We could not confirm whether the daemon accepts an ALSA-device flag,
+    #      so rather than guess a CLI argument we force its audio through this
+    #      display's shared softvol device (CALDERA_AUDIO_DEVICE, default
+    #      seeed_media) using ALSA_CONFIG_PATH. That keeps it on the dmix path so
+    #      it coexists with voice/TTS instead of seizing the WM8960 directly.
+    #      ⚠ VERIFY after install (see the printed checklist below) — if Caldera
+    #      exposes a native output-device setting, prefer that.
+
+    export XDG_RUNTIME_DIR="/run/user/$USER_ID"
+
+    info "Running the Caldera headless installer..."
+    if curl -fsSL https://releases.caldera.homes/music/headless/install.sh | bash; then
+        success "Caldera installer completed."
+    else
+        warn "Caldera installer failed (network or upstream issue). Skipping Caldera"
+        warn "setup — re-run configure.sh once resolved. The rest of the build continues."
+    fi
+
+    CALDERA_BIN="$CURRENT_HOME/caldera-music/caldera-music"
+    if [ -x "$CALDERA_BIN" ]; then
+        # ALSA routing override scoped to the Caldera service only.
+        # ALSA_CONFIG_PATH replaces the global config search, so we re-include
+        # the stock ALSA config and this device's seeed dmix/softvol stack, then
+        # repoint the default PCM at the shared media softvol device.
+        info "Writing Caldera ALSA routing (default → ${CALDERA_AUDIO_DEVICE})..."
+        sudo mkdir -p /etc/smart-display
+        sudo tee /etc/smart-display/caldera-asound.conf > /dev/null << ALSACALDERAEOF
+# Caldera ALSA routing for the Smart Display (loaded via ALSA_CONFIG_PATH).
+# Re-include the stock ALSA config and the seeed dmix/softvol stack, then
+# override the default PCM so Caldera (which opens ALSA "default") plays through
+# ${CALDERA_AUDIO_DEVICE} -> dmix -> WM8960, coexisting with voice/TTS.
+</usr/share/alsa/alsa.conf>
+</etc/asound.conf>
+
+pcm.!default {
+    type plug
+    slave.pcm "${CALDERA_AUDIO_DEVICE}"
+}
+ALSACALDERAEOF
+
+        # systemd --user drop-in: inject the ALSA config path into the service
+        # the installer created. A drop-in survives Caldera's self-updates.
+        info "Creating Caldera systemd --user drop-in..."
+        mkdir -p "$CURRENT_HOME/.config/systemd/user/caldera-music.service.d"
+        cat > "$CURRENT_HOME/.config/systemd/user/caldera-music.service.d/10-smart-display.conf" << 'CALDERADROPEOF'
+[Service]
+# Force Caldera's ALSA "default" device onto the shared seeed softvol stack so
+# it coexists with the voice/TTS pipeline through dmix. Adjust the target in
+# /etc/smart-display/caldera-asound.conf if you change CALDERA_AUDIO_DEVICE.
+Environment=ALSA_CONFIG_PATH=/etc/smart-display/caldera-asound.conf
+CALDERADROPEOF
+
+        systemctl --user daemon-reload 2>/dev/null || true
+        # Enable so it starts on boot; it will only succeed once you complete the
+        # one-time Plex login below. Enabling now is harmless before then.
+        systemctl --user enable caldera-music 2>/dev/null || true
+
+        success "Caldera installed and ALSA-routed to '${CALDERA_AUDIO_DEVICE}'."
+        echo ""
+        warn "Caldera needs a ONE-TIME manual Plex login before it will play:"
+        echo "      1) $CALDERA_BIN --login"
+        echo "      2) systemctl --user enable --now caldera-music"
+        echo ""
+        warn "Then VERIFY audio routing — play something from Plexamp and confirm"
+        echo "      voice/TTS still works at the same time. If Caldera grabbed the"
+        echo "      card alone, it is not honouring ALSA 'default'; check for a"
+        echo "      native output-device setting in its config and point it at"
+        echo "      '${CALDERA_AUDIO_DEVICE}'. Logs: journalctl --user -u caldera-music -f"
+    else
+        warn "Caldera binary not found at $CALDERA_BIN — skipping service setup."
+    fi
+else
+    # MA-only: stop a previously-installed Caldera user service if present.
+    export XDG_RUNTIME_DIR="/run/user/$USER_ID"
+    if systemctl --user list-unit-files 2>/dev/null | grep -q '^caldera-music.service'; then
+        info "Music player is '$MUSIC_PLAYER' — disabling existing Caldera service..."
+        systemctl --user disable --now caldera-music 2>/dev/null || true
+        success "Caldera disabled."
+    fi
+fi
 
 # ── MQTT Bridge (HA device auto-discovery) ────────────────────────────────────
 section "MQTT Bridge"
@@ -785,6 +995,8 @@ MQTT_USERNAME=$MQTT_USERNAME
 MQTT_PASSWORD=$MQTT_PASSWORD
 DEVICE_NAME=$DEVICE_NAME
 DEVICE_ID=$(echo "$DEVICE_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd 'a-z0-9_')
+DASHBOARD_URL=$KIOSK_URL
+CDP_PORT=9222
 ENVEOF
     sudo chmod 600 "$MQTT_ENV_FILE"
 
@@ -924,6 +1136,8 @@ unclutter --timeout 1 &
     --kiosk \
     --ozone-platform=wayland \
     --touch-events=enabled \
+    --remote-debugging-port=9222 \
+    --remote-allow-origins=* \
     --noerrdialogs \
     --disable-infobars \
     --no-first-run \
@@ -980,6 +1194,8 @@ Verify under **Settings → Devices & Services → MQTT → __DEVICENAME__**:
 | `number.__DEVICEID___media_volume` | Music Assistant volume (0–100) |
 | `number.__DEVICEID___brightness` | Display brightness (0–100) |
 | `number.__DEVICEID___mic_gain` | Mic sensitivity (0–100) |
+| `button.__DEVICEID___dashboard_reload` | Reload the kiosk dashboard |
+| `text.__DEVICEID___dashboard_url` | Navigate the kiosk to a URL |
 
 > **Note:** If entity IDs differ, check the actual names in HA under the device page.
 > HA may append `_2`, `_3` etc. on re-registrations.
@@ -1061,6 +1277,42 @@ automation:
 
 The device registers itself in Music Assistant 2.7+ as **"__DEVICENAME__"** automatically.
 No additional configuration needed — it appears as a player in MA the moment sendspin connects.
+(Only applies if you chose `music-assistant` or `both` as the music player.)
+
+If you chose `caldera` or `both`, finish the one-time Plex login on the Pi:
+
+```bash
+~/caldera-music/caldera-music --login
+systemctl --user enable --now caldera-music
+```
+
+Then control playback from Plexamp / the Plex apps. Verify voice/TTS still works
+while Caldera is playing — if not, point Caldera's output at `seeed_media`.
+
+---
+
+## 7. Dashboard Refresh
+
+Reload the kiosk page (e.g. after an HA reboot) or push a new dashboard URL:
+
+- **Reload Dashboard** button and **Dashboard URL** text box appear on the device in HA.
+- Or publish to `smart-display/__DEVICEID__/dashboard/set`:
+  `reload` (reload), `home` (back to the kiosk URL), or any `http(s)://…` URL.
+
+To auto-reload all displays after HA restarts:
+
+```yaml
+automation:
+  - alias: "Reload smart displays after HA restart"
+    trigger:
+      - platform: homeassistant
+        event: start
+    action:
+      - delay: "00:00:30"
+      - action: button.press
+        target:
+          entity_id: button.__DEVICEID___dashboard_reload
+```
 
 ---
 
@@ -1114,10 +1366,16 @@ printf "  │     Host: %-20s  Port: 6053              │\n" "$(hostname).local
 echo "  │                                                             │"
 echo "  │  3. Click 'Set Up Voice Assistant' to configure pipeline.   │"
 echo "  │                                                             │"
+if [ "$MUSIC_PLAYER" = "music-assistant" ] || [ "$MUSIC_PLAYER" = "both" ]; then
 echo "  │  4. Music Assistant (2.7+): Sendspin is always-on in MA.    │"
 echo "  │     No provider setup needed — your device appears as:     │"
 printf "  │     %-57s│\n" "'$DEVICE_NAME'"
 echo "  │                                                             │"
+fi
+if [ "$MUSIC_PLAYER" = "caldera" ] || [ "$MUSIC_PLAYER" = "both" ]; then
+echo "  │  4b. Caldera: one-time Plex login needed — see below.       │"
+echo "  │                                                             │"
+fi
 echo "  │  5. Say your wake word and test the voice pipeline!          │"
 echo "  └─────────────────────────────────────────────────────────────┘"
 echo ""
@@ -1127,6 +1385,27 @@ echo ""
 echo "  To follow live logs:"
 echo "    sudo journalctl -u linux-voice-assistant -f"
 echo ""
+
+# Caldera needs an interactive Plex login that cannot be scripted. Surface the
+# exact steps prominently at the very end so they're the last thing the user sees
+# (and easy to copy-paste) whether or not they reboot now.
+if [ "$MUSIC_PLAYER" = "caldera" ] || [ "$MUSIC_PLAYER" = "both" ]; then
+    echo -e "  ${BOLD}${MAGENTA}━━━  Caldera: one-time Plex login required  ━━━${NC}"
+    echo ""
+    echo "  Caldera won't play until it's linked to your Plex account. Run these"
+    echo "  as '$CURRENT_USER' on this device (after a reboot is fine):"
+    echo ""
+    echo -e "    ${BOLD}~/caldera-music/caldera-music --login${NC}"
+    echo "        Follow the on-screen prompt to authorise with Plex (one time)."
+    echo ""
+    echo -e "    ${BOLD}systemctl --user enable --now caldera-music${NC}"
+    echo "        Starts Caldera now and on every boot."
+    echo ""
+    echo "  Then play something from Plexamp and confirm voice/TTS still works at"
+    echo "  the same time (shared audio check). Logs:"
+    echo "    journalctl --user -u caldera-music -f"
+    echo ""
+fi
 
 read -rp "Reboot now? [Y/n] " DO_REBOOT
 DO_REBOOT="${DO_REBOOT:-Y}"

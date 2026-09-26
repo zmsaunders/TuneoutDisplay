@@ -42,12 +42,28 @@ TuneoutDisplay/          ← repo name on Pi (note the 'e')
 | Service | Description | Runs as |
 |---------|-------------|---------|
 | `linux-voice-assistant` | LVA voice pipeline (ESPHome protocol, OWW wake word) | user |
-| `sendspin` | Music Assistant native player (sendspin protocol) | user |
-| `smart-display-mqtt` | MQTT bridge — registers HA entities via discovery | user |
+| `sendspin` | Music Assistant native player (sendspin protocol) — installed only when `MUSIC_PLAYER` is `music-assistant`/`both` | user |
+| `caldera-music` | Caldera headless Plex player — installed only when `MUSIC_PLAYER` is `caldera`/`both`; **systemd `--user` service**, self-updating | user |
+| `smart-display-mqtt` | MQTT bridge — registers HA entities via discovery; also drives Chromium over CDP for dashboard refresh | user |
 | `smart-display-audio-init` | Boot-time ALSA init — waits for card, applies codec settings | root (system) |
 | `smart-display-touch-scroll` | Touch→scroll daemon using uinput | root (system) |
 
 Credentials for the MQTT bridge are in `/etc/smart-display/mqtt.env` (mode 600).
+That file also carries `DASHBOARD_URL` (the kiosk URL, used by the `home`
+dashboard command) and `CDP_PORT` (Chromium remote-debugging port, default 9222).
+
+## Music player selection
+
+`configure.sh` prompts for `MUSIC_PLAYER` ∈ {`music-assistant`, `caldera`, `both`}
+(saved in `~/.smart-display-settings`). The sendspin and Caldera sections are each
+guarded by this value, and each section disables the *other* player's service when
+it's not selected, so re-running to switch backends is clean.
+
+Caldera specifics:
+- Installed via `curl -fsSL https://releases.caldera.homes/music/headless/install.sh | bash` into `~/caldera-music/`.
+- Requires a one-time interactive `caldera-music --login` (Plex device auth) that cannot be scripted; the script prints the manual steps and enables (but cannot start) the service.
+- ALSA-device selection could not be verified upstream, so instead of guessing a CLI flag the build forces Caldera's ALSA `default` onto `CALDERA_AUDIO_DEVICE` (default `seeed_media`) via a systemd `--user` drop-in that sets `ALSA_CONFIG_PATH=/etc/smart-display/caldera-asound.conf`. That config re-includes `/usr/share/alsa/alsa.conf` and `/etc/asound.conf` then overrides `pcm.!default`. **This is unverified — confirm coexistence with voice/TTS after first play.**
+- Self-updates in the background; the build does not pin its version. The drop-in survives updates.
 
 ---
 
@@ -94,6 +110,31 @@ amixer -c seeed2micvoicec cset numid=13 122,122 -q
 
 ---
 
+## Kernel policy (pinned to 6.12)
+
+The seeed-voicecard DKMS driver is out-of-tree and breaks on ASoC API changes —
+kernel 6.18 removed the legacy `SND_SOC_DAIFMT_CB*_CF*` macros, changed the
+`SOC_SINGLE_VALUE` arity, and changed `simple_util_*` signatures, none of which
+the HinTak fork handles yet. To keep the fleet reproducible and avoid mid-upgrade
+dpkg breakage, `configure.sh` **holds the kernel at the current 6.12 series**:
+
+```bash
+sudo apt-mark hold linux-image-rpi-v8 linux-image-rpi-2712 \
+                   linux-headers-rpi-v8 linux-headers-rpi-2712
+```
+
+- The hold runs in the System Update section *before* `apt full-upgrade`, so the
+  upgrade keeps the kernel back while still patching userspace.
+- `apt-mark hold` freezes at the **currently installed** version. This assumes the
+  device is provisioned from a 6.12-era image. A device already on a newer kernel
+  (e.g. one that slipped to 6.18) freezes *there* — re-image it to standardise.
+- To intentionally move the fleet to a newer kernel later: validate the seeed
+  driver builds and audio works on it on ONE device, extend `patch_seeed_source`
+  for any new API breaks, then `apt-mark unhold` + bump.
+- Bringing a 6.18 device back to 6.12 in place (apt downgrade) is unreliable on
+  Raspberry Pi OS because the boot image (`/boot/firmware/kernel8.img`) is the
+  newest installed kernel — re-imaging is the dependable path.
+
 ## DKMS / kernel mismatch
 
 After `apt full-upgrade`, the newly installed kernel may not have the seeed-voicecard DKMS module built for it. Symptoms: `dmesg | grep wm8960` shows `No MCLK configured`, all `aplay` attempts fail even with the card enumerated.
@@ -101,6 +142,24 @@ After `apt full-upgrade`, the newly installed kernel may not have the seeed-voic
 `configure.sh` handles this via:
 1. After building/installing the module, it runs `dkms autoinstall` to cover all kernels in `/lib/modules/`.
 2. A post-upgrade check block detects if the running kernel is missing the module and rebuilds.
+
+### Source patches (`patch_seeed_source`)
+
+The seeed source needs kernel-API fixes that are applied by `patch_seeed_source()`
+(defined near the top of `configure.sh`, grep-guarded and idempotent):
+- **6.x:** `rtd->id` → `rtd->dai_link->id` (`snd_soc_pcm_runtime` lost `->id`).
+- **6.18:** the legacy ASoC clock master/slave DAI-format macros were removed.
+  `SND_SOC_DAIFMT_CBM_CFM`/`CBS_CFS`/`CBM_CFS`/`CBS_CFM` →
+  `CBP_CFP`/`CBC_CFC`/`CBP_CFC`/`CBC_CFP` (provider/consumer rename) across all
+  codec sources (`wm8960.c`, `ac101.c`, `ac108.c`). Symptom if missing:
+  `error: 'SND_SOC_DAIFMT_CBM_CFM' undeclared` in `make.log`, which fails the
+  kernel's DKMS post-install hook and leaves dpkg half-configured.
+
+**Critical ordering:** `patch_seeed_source` is called *before* `apt full-upgrade`,
+not only in the driver section. The upgrade can install a new kernel whose
+`header_postinst.d/dkms` hook rebuilds every DKMS module immediately; if the
+source is unpatched at that moment the hook fails and blocks the whole upgrade
+before the driver section is ever reached.
 
 Manual fix if needed:
 ```bash
@@ -121,6 +180,15 @@ The bridge registers all entities under device `DEVICE_ID` (derived from `DEVICE
 | `number` | `media_volume` | Music Assistant volume 0–100% | `amixer cset name="Media Volume"` |
 | `number` | `brightness` | Display backlight 0–100% | `/sys/class/backlight/10-0045/brightness` |
 | `number` | `mic_gain` | Mic sensitivity 0–100% | `amixer cset numid=1` (WM8960 Capture PGA, ALSA 0–63) |
+| `button` | `dashboard_reload` | Reload the kiosk page | CDP `Page.reload` via `localhost:CDP_PORT` |
+| `text` | `dashboard_url` | Navigate the kiosk to a URL | CDP `Page.navigate` via `localhost:CDP_PORT` |
+
+The button and text entity share one command topic, `…/dashboard/set`. Payload
+handling: `''`/`reload`/`refresh` → reload; `home` → navigate to `DASHBOARD_URL`;
+`http(s)://…` → navigate to that URL. The bridge reaches Chromium over the Chrome
+DevTools Protocol (`--remote-debugging-port=9222 --remote-allow-origins=*` in the
+labwc autostart), using the `python3-websocket` package. CDP is a plain TCP/WS
+call to localhost, so it works regardless of the bridge's graphical session.
 
 Brightness min values:
 - **MQTT entity min = 0** — allows automations to turn the display fully off
@@ -176,6 +244,7 @@ Features:
 | Speaker volume resets on reboot | `alsactl restore` races with driver init; audio-init service may fire before codec settles | Volume is re-applied in labwc autostart (runs after session start, driver fully settled) |
 | dmix `unable to install hw params` | `pipewire-alsa` installed and intercepting ALSA | `sudo apt remove --purge pipewire-alsa` then reboot |
 | `No MCLK configured` in dmesg, all aplay fails | DKMS module built for old kernel, running new kernel post-upgrade | Rebuild for running kernel (see DKMS section above) |
+| `apt full-upgrade` fails with `header_postinst.d/dkms exited with return code 1`, kernel packages left unconfigured | seeed source won't compile against the new kernel headers (e.g. 6.18 removed the legacy `SND_SOC_DAIFMT_CB*_CF*` macros), failing the kernel's DKMS hook | Patch the source (`patch_seeed_source` logic), then `sudo apt --fix-broken install`. The script now pre-patches before upgrading to prevent this. |
 | Brightness entity accepts 0 but card won't go below 5 | Intentional design — automation can turn screen off; user slider cannot | Expected behaviour |
 
 ---
