@@ -668,7 +668,7 @@ section "Speaker Volume"
 # the volume button service.
 if amixer -c seeed2micvoicec controls 2>/dev/null | grep -qi "speaker"; then
     info "Setting WM8960 hardware speaker to 94% (fixed master level)..."
-    amixer -c seeed2micvoicec sset 'Speaker' 94% -q
+    amixer -c seeed2micvoicec cset numid=13 127,127 -q
     success "Hardware speaker level set."
 else
     warn "Could not find Speaker control on seeed2micvoicec — skipping (card not loaded yet)."
@@ -676,12 +676,12 @@ else
 fi
 
 # Seed default per-stream software volumes if state files don't exist yet.
-# TTS at 90%, media at 75% — voice slightly louder than music by default.
+# TTS at 100%, media at 90% — voice slightly louder than music by default.
 # Mic gain at 63% — maps to ALSA value 40 (0 dB on the WM8960 Capture PGA).
-[ -f "$CURRENT_HOME/.smart-display-tts-volume"   ] || echo "90" > "$CURRENT_HOME/.smart-display-tts-volume"
-[ -f "$CURRENT_HOME/.smart-display-media-volume" ] || echo "75" > "$CURRENT_HOME/.smart-display-media-volume"
+[ -f "$CURRENT_HOME/.smart-display-tts-volume"   ] || echo "100" > "$CURRENT_HOME/.smart-display-tts-volume"
+[ -f "$CURRENT_HOME/.smart-display-media-volume" ] || echo "90" > "$CURRENT_HOME/.smart-display-media-volume"
 [ -f "$CURRENT_HOME/.smart-display-mic-gain"     ] || echo "63" > "$CURRENT_HOME/.smart-display-mic-gain"
-success "Default stream volumes seeded (TTS: 90%, Media: 75%, Mic: 63%)."
+success "Default stream volumes seeded (TTS: 100%, Media: 90%, Mic: 63%)."
 
 # Persist all ALSA mixer settings so they survive reboot.
 # alsactl store writes to /var/lib/alsa/asound.state.
@@ -722,7 +722,7 @@ done
 # This must be re-applied every boot because alsactl restore can be beaten by the
 # driver resetting codec registers after enumeration.  Keeping it here rather than
 # in asound.state makes the intent explicit and self-documenting.
-amixer -c seeed2micvoicec cset numid=13 122,122 -q 2>/dev/null || true
+amixer -c seeed2micvoicec cset numid=13 127,127 -q 2>/dev/null || true
 
 # Re-apply ALC settings explicitly. Enumerated controls (type=ENUMERATED) are
 # not reliably restored by alsactl on all kernel/driver versions.
@@ -1114,7 +1114,7 @@ pkill wfbar || true
 # This runs here in addition to smart-display-audio-init.service because the
 # audio-init service fires early in boot before the codec registers have fully
 # settled; by the time the desktop session starts the driver is stable.
-amixer -c seeed2micvoicec cset numid=13 122,122 -q 2>/dev/null || true
+amixer -c seeed2micvoicec cset numid=13 127,127 -q 2>/dev/null || true
 
 # Hide the mouse cursor
 unclutter --timeout 1 &

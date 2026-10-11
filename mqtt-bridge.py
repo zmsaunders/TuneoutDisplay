@@ -305,8 +305,8 @@ def on_connect(client, userdata, connect_flags, reason_code, properties):
         client.publish(topic, json.dumps(payload), retain=True)
 
     # Publish current state so HA sliders reflect actual values immediately
-    client.publish(state_topic("tts_volume"),   str(_read_state(TTS_VOL_FILE,   90)), retain=True)
-    client.publish(state_topic("media_volume"), str(_read_state(MEDIA_VOL_FILE, 75)), retain=True)
+    client.publish(state_topic("tts_volume"),   str(_read_state(TTS_VOL_FILE, 100)), retain=True)
+    client.publish(state_topic("media_volume"), str(_read_state(MEDIA_VOL_FILE, 90)), retain=True)
     client.publish(state_topic("brightness"),   str(_read_brightness_pct()),           retain=True)
     client.publish(state_topic("mic_gain"),     str(_read_mic_gain_pct()),             retain=True)
     client.publish(state_topic("dashboard_url"), DASHBOARD_URL,                         retain=True)
