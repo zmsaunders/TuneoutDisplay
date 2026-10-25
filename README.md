@@ -69,7 +69,8 @@ git checkout v2.0        # until v2 is merged to main
 ./install.sh
 ```
 
-The installer asks for: role, device name, dashboard URL, audio output
+The installer asks for: role, device name, dashboard URL, colour scheme
+(`dark` / `light`), audio output
 (`none` / `max98357a` / `wm8960` / `usb`), speaker volume, Music Assistant
 yes/no, wake word (voice role), and MQTT broker details. It updates the system,
 installs what the role needs, and offers to reboot when a boot setting changed
@@ -214,6 +215,8 @@ virtual mic is added for LVA, which opens a microphone even in output-only mode.
 **WM8960 card present but silent** — check `amixer -c wm8960soundcard` shows *Left/Right Output Mixer PCM* on and *Speaker* up. `sudo /usr/local/sbin/tuneout-wm8960-mixer` re-applies them. The in-tree overlay assumes a 12.288 MHz codec clock (Waveshare); if playback is silent or the wrong pitch on the Keyestudio HAT, use the MAX98357A instead.
 
 **MQTT entities missing** — check `/etc/smart-display/mqtt.env`, that discovery is enabled in HA, and `journalctl -u smart-display-mqtt -f`.
+
+**Dashboard still light in dark mode** — dark mode makes the page report a dark preference; Home Assistant follows it only when the dashboard user's profile has **Dark Mode: Auto** (Profile → Browser settings). A theme picked explicitly in the profile wins.
 
 **Mouse cursor visible on the kiosk** — the Pi's HDMI-CEC inputs (`vc4-hdmi-0/1`) look like a mouse to the compositor. The installer adds a udev rule so they're ignored; re-run `./install.sh` after `git pull` and reboot. Check with `udevadm info /dev/input/event0 | grep LIBINPUT_IGNORE_DEVICE`.
 

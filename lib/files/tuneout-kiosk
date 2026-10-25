@@ -25,6 +25,11 @@ fi
 
 BROWSER="$(command -v chromium || command -v chromium-browser)"
 
+# dark → pages see prefers-color-scheme: dark (HA's "Auto" dark mode follows).
+# Not WebContentsForceDark, which recolours pages that don't support dark.
+THEME_FLAGS=""
+[ "${KIOSK_THEME:-dark}" = dark ] && THEME_FLAGS="--force-dark-mode"
+
 # Notes on flags:
 #  --user-data-dir   Chromium ignores --remote-debugging-port on the default
 #                    profile (Chrome 136+), so the kiosk has its own.
@@ -33,7 +38,7 @@ BROWSER="$(command -v chromium || command -v chromium-browser)"
 #  --renderer-process-limit / --max-old-space-size  memory caps for 1 GB boards.
 #  --disable-pinch / --overscroll-history-navigation=0  no accidental zoom or
 #                    swipe-back with native touch.
-# shellcheck disable=SC2086  # CHROMIUM_EXTRA_FLAGS is intentionally word-split
+# shellcheck disable=SC2086  # THEME_FLAGS / CHROMIUM_EXTRA_FLAGS are intentionally word-split
 exec "$BROWSER" \
     --kiosk \
     --ozone-platform=wayland \
@@ -55,5 +60,6 @@ exec "$BROWSER" \
     --overscroll-history-navigation=0 \
     --renderer-process-limit=1 \
     --js-flags="--max-old-space-size=192" \
+    $THEME_FLAGS \
     ${CHROMIUM_EXTRA_FLAGS:-} \
     "$KIOSK_URL"

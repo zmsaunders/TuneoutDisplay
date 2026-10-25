@@ -88,6 +88,9 @@ while :; do
     warn "Enter a full http(s):// URL."
     KIOSK_URL=""
 done
+# Dark makes Chromium report prefers-color-scheme: dark; HA follows it when the
+# dashboard user's Dark Mode is "Auto" (the default).
+ask_choice KIOSK_THEME "Kiosk colour scheme" dark dark light
 
 echo ""
 echo "  Audio output:"
@@ -143,6 +146,7 @@ printf '    %-16s %s\n' \
     "Role"           "$ROLE" \
     "Device"         "$DEVICE_NAME ($DEVICE_ID)" \
     "Dashboard"      "$KIOSK_URL" \
+    "Colour scheme"  "$KIOSK_THEME" \
     "Audio output"   "$AUDIO_OUTPUT" \
     "Music Assistant" "$MUSIC_ASSISTANT" \
     "MQTT"           "$MQTT_HOST:$MQTT_PORT ${MQTT_USERNAME:+(user $MQTT_USERNAME)}"

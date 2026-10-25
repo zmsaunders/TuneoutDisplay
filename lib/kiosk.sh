@@ -12,23 +12,6 @@ KIOSK_LAUNCHER="/usr/local/bin/tuneout-kiosk"
 KIOSK_ENV="$CONF_DIR/kiosk.env"
 KIOSK_PROFILE_DIR="$CURRENT_HOME/.local/share/tuneout-kiosk/chromium"
 CDP_PORT=9222
-BLANK_CURSOR_THEME="tuneout-blank"
-BLANK_CURSOR_DIR="/usr/share/icons/$BLANK_CURSOR_THEME"
-
-# Every cursor name cage (wlroots) or Chromium may ask for: CSS names plus
-# the legacy X11 aliases. All point at one fully transparent image.
-BLANK_CURSOR_NAMES=(
-    default left_ptr arrow top_left_arrow pointer hand hand1 hand2 pointing_hand
-    text xterm ibeam vertical-text wait watch progress left_ptr_watch half-busy
-    help question_arrow whats_this crosshair cross tcross cell plus move fleur
-    all-scroll grab grabbing openhand closedhand dnd-move dnd-copy dnd-link dnd-none
-    copy alias context-menu not-allowed no-drop crossed_circle forbidden circle
-    col-resize row-resize sb_h_double_arrow sb_v_double_arrow split_h split_v
-    n-resize s-resize e-resize w-resize ne-resize nw-resize se-resize sw-resize
-    ew-resize ns-resize nesw-resize nwse-resize size_hor size_ver size_bdiag size_fdiag
-    top_side bottom_side left_side right_side top_left_corner top_right_corner
-    bottom_left_corner bottom_right_corner zoom-in zoom-out none
-)
 
 kiosk_install() {
     section "Kiosk (cage + Chromium)"
@@ -64,13 +47,11 @@ kiosk_install() {
         env_line CDP_PORT "$CDP_PORT"
         env_line PROFILE_DIR "$KIOSK_PROFILE_DIR"
         env_line CHROMIUM_EXTRA_FLAGS "${CHROMIUM_EXTRA_FLAGS:-}"
+        env_line KIOSK_THEME "${KIOSK_THEME:-dark}"
     } | install_file "$KIOSK_ENV" 644
     local changed=$FILE_CHANGED
 
     install_file "$KIOSK_LAUNCHER" 755 < "$SCRIPT_DIR/lib/files/tuneout-kiosk"
-    changed=$((changed | FILE_CHANGED))
-
-    _install_blank_cursor
     changed=$((changed | FILE_CHANGED))
 
     _ignore_hdmi_cec_input
@@ -110,9 +91,6 @@ UtmpIdentifier=tty1
 UtmpMode=user
 # Let cage start even if the touchscreen hasn't enumerated yet.
 Environment=WLR_LIBINPUT_NO_DEVICES=1
-# Invisible cursor theme (see _install_blank_cursor).
-Environment=XCURSOR_THEME=$BLANK_CURSOR_THEME
-Environment=XCURSOR_SIZE=24
 EnvironmentFile=$KIOSK_ENV
 # -d: no client-side decorations. cage hides the cursor when there's no mouse.
 ExecStart=/usr/bin/cage -d -- $KIOSK_LAUNCHER
@@ -152,52 +130,6 @@ EOF
         sudo udevadm control --reload-rules
         sudo udevadm trigger --subsystem-match=input --action=change
     fi
-}
-
-# ── Invisible cursor ─────────────────────────────────────────────────────────
-# cage is meant to hide the cursor when there's no mouse, but on the Pi 4 +
-# DSI touchscreen a cursor still sat mid-screen (cage centres it at start).
-# Rather than chase which layer draws it, give both cage (wlroots) and
-# Chromium a cursor theme whose every image is transparent, and make it the
-# kiosk user's default theme. Sets FILE_CHANGED=1 if anything changed.
-_install_blank_cursor() {
-    local any=0 tmp name
-    tmp="$(mktemp)"
-    # One 24x24 fully transparent Xcursor image (Xcursor file format:
-    # header, one TOC entry, one image chunk of ARGB pixels).
-    python3 - "$tmp" << 'PY'
-import struct, sys
-size = 24
-pixels = b"\0" * (size * size * 4)
-img = struct.pack("<9I", 36, 0xFFFD0002, size, 1, size, size, 0, 0, 0) + pixels
-toc = struct.pack("<3I", 0xFFFD0002, size, 16 + 12)
-with open(sys.argv[1], "wb") as f:
-    f.write(b"Xcur" + struct.pack("<3I", 16, 0x10000, 1) + toc + img)
-PY
-    install_file "$BLANK_CURSOR_DIR/cursors/default" 644 < "$tmp"
-    any=$((any | FILE_CHANGED))
-    rm -f "$tmp"
-
-    for name in "${BLANK_CURSOR_NAMES[@]}"; do
-        [ "$name" = default ] && continue
-        if [ "$(readlink "$BLANK_CURSOR_DIR/cursors/$name" 2>/dev/null)" != default ]; then
-            sudo ln -sfn default "$BLANK_CURSOR_DIR/cursors/$name"
-            any=1
-        fi
-    done
-
-    printf '[Icon Theme]\nName=TuneoutDisplay blank cursor\nComment=Fully transparent cursors for the kiosk\n' \
-        | install_file "$BLANK_CURSOR_DIR/index.theme" 644
-    any=$((any | FILE_CHANGED))
-
-    # ~/.icons/default is searched before system themes by both wlroots and
-    # Chromium, so this covers code paths that ignore XCURSOR_THEME.
-    mkdir -p "$CURRENT_HOME/.icons/default"   # user-owned, not via sudo
-    printf '[Icon Theme]\nInherits=%s\n' "$BLANK_CURSOR_THEME" \
-        | install_file "$CURRENT_HOME/.icons/default/index.theme" 644 "$CURRENT_USER:$CURRENT_USER"
-    any=$((any | FILE_CHANGED))
-
-    FILE_CHANGED=$any
 }
 
 # ── Touch-scroll fallback (off by default) ───────────────────────────────────

@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # ─────────────────────────────────────────────────────────────────────────────
-# lib/cleanup.sh — remove v1 leftovers so a v1 device can be re-run in place.
+# lib/cleanup.sh — remove leftovers from v1 (and early v2) so a device can be
+# re-run in place.
 # On a fresh Lite image every step here is a no-op.
 #
 # Deliberately NOT touched: the seeed-voicecard DKMS module itself (removing a
@@ -55,12 +56,25 @@ legacy_cleanup() {
           "$CURRENT_HOME/.smart-display-tts-volume" "$CURRENT_HOME/.smart-display-media-volume" \
           "$CURRENT_HOME/.smart-display-mic-gain"
 
+    # Early-v2 invisible cursor theme — superseded by the HDMI-CEC udev rule.
+    if [ -d /usr/share/icons/tuneout-blank ]; then
+        found=1
+        sudo rm -rf /usr/share/icons/tuneout-blank
+        info "Removed the unused tuneout-blank cursor theme."
+    fi
+    if [ -f "$CURRENT_HOME/.icons/default/index.theme" ] \
+       && grep -qx 'Inherits=tuneout-blank' "$CURRENT_HOME/.icons/default/index.theme"; then
+        found=1
+        rm -f "$CURRENT_HOME/.icons/default/index.theme"
+        rmdir "$CURRENT_HOME/.icons/default" "$CURRENT_HOME/.icons" 2>/dev/null || true
+    fi
+
     if dkms status seeed-voicecard 2>/dev/null | grep -q seeed; then
         warn "The v1 seeed-voicecard DKMS module is still installed. v2 doesn't use it,"
         warn "and it may fail to build on new kernels. Re-imaging with Lite is the clean fix;"
         warn "or remove it: sudo dkms remove seeed-voicecard/0.3 --all"
     fi
 
-    [ "$found" = 1 ] && success "v1 leftovers cleaned up."
+    [ "$found" = 1 ] && success "Old leftovers cleaned up."
     return 0
 }

@@ -31,7 +31,7 @@ lib/audio.sh        PipeWire, overlays, onboard-audio off, silent mic, WM8960 mi
 lib/voice.sh        LVA (pinned tag), output-only vs full, wake-word-off patch
 lib/music.sh        sendspin (pinned version)
 lib/mqtt.sh         bridge install, backlight udev rule
-lib/cleanup.sh      removes v1 leftovers (no-op on a fresh image)
+lib/cleanup.sh      removes v1 / early-v2 leftovers (no-op on a fresh image)
 lib/notes.sh        writes ~/smart-display-setup.md
 lib/files/tuneout-kiosk   kiosk launcher (wait for HA → exec Chromium)
 mqtt-bridge.py      MQTT discovery bridge
@@ -50,6 +50,7 @@ re-run; `install.sh --non-interactive` uses it as-is). Keys are listed in
 | Setting | Values | Notes |
 |---|---|---|
 | `ROLE` | `display` / `voice` | voice needs `ALLOW_UNTESTED=yes` |
+| `KIOSK_THEME` | `dark` (default) / `light` | dark → Chromium `--force-dark-mode` (pages see `prefers-color-scheme: dark`; HA follows when the user's Dark Mode is Auto). Don't use `WebContentsForceDark` — it recolours pages |
 | `AUDIO_OUTPUT` | `none` / `max98357a` / `wm8960` / `usb` | voice role forces `usb` (board's own amp, needed for its AEC) |
 | `MUSIC_ASSISTANT` | yes/no | forced `no` without audio |
 | `WAKE_WORD_ENABLED`, `WAKE_WORD` | | voice role only |
@@ -84,7 +85,7 @@ disables what's no longer used. Keep that pairing when adding features.
 ## Kiosk
 
 - `tuneout-kiosk.service`: `User=<user>`, `PAMName=tuneout-kiosk` (`/etc/pam.d/tuneout-kiosk` includes `pam_systemd` → logind session on seat0/tty1), `TTYPath=/dev/tty1`, `ExecStart=cage -d -- /usr/local/bin/tuneout-kiosk`. Conflicts with `getty@tty1`. If lightdm is enabled the installer disables it.
-- **Cursor:** the Pi registers HDMI-CEC remotes (`vc4-hdmi-0/1`) as input devices even with no HDMI attached. The kernel remote-control layer gives every remote relative X/Y, so libinput treats them as pointers → cage's seat gets a pointer, Chromium reports `any-pointer: fine` and draws its own cursor where cage centred it. Fix: `/etc/udev/rules.d/90-tuneout-ignore-hdmi-cec-input.rules` sets `LIBINPUT_IGNORE_DEVICE=1` for `vc4-hdmi*`. An all-transparent Xcursor theme (`tuneout-blank`, via `XCURSOR_THEME` + `~/.icons/default`) is also installed; it did NOT fix the Chromium cursor on its own — remove it once the udev rule is confirmed on hardware. Don't fix this with dashboard CSS.
+- **Cursor:** the Pi registers HDMI-CEC remotes (`vc4-hdmi-0/1`) as input devices even with no HDMI attached. The kernel remote-control layer gives every remote relative X/Y, so libinput treats them as pointers → cage's seat gets a pointer, Chromium reports `any-pointer: fine` and draws its own cursor where cage centred it. Fix: `/etc/udev/rules.d/90-tuneout-ignore-hdmi-cec-input.rules` sets `LIBINPUT_IGNORE_DEVICE=1` for `vc4-hdmi*`. Confirmed on hardware. (An earlier transparent cursor theme did not help — Chromium draws its own cursor — and `lib/cleanup.sh` removes it from devices that got it.) Don't fix this with dashboard CSS.
 - Launcher waits for the dashboard's origin (`curl -k`), clears Chromium's crashed-session flag, then execs Chromium.
 - **CDP:** `--remote-debugging-port=9222` binds 127.0.0.1. Chromium 136+ ignores it on the default profile, hence `--user-data-dir=~/.local/share/tuneout-kiosk/chromium`. The bridge connects with `suppress_origin=True`, so `--remote-allow-origins` is not used.
 - Touch: cage forwards real touch events; Chromium scrolls natively. `touch-scroll.py` is kept only as an opt-in fallback until that's confirmed on hardware — delete it once confirmed.
