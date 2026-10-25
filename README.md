@@ -1,6 +1,9 @@
 # TuneoutDisplay
 
-A countertop smart display built on Raspberry Pi with a Home Assistant kiosk, always-on wake word detection, voice pipeline, a choice of music backends (Music Assistant and/or Caldera), and full HA device integration via MQTT.
+A countertop smart display built on a Raspberry Pi: a Home Assistant dashboard
+kiosk with HA device integration over MQTT, plus optional speaker output for
+HA announcements and Music Assistant — and, once a USB voice board is in hand,
+a full voice assistant.
 
 ## Full Disclosure
 
@@ -8,44 +11,40 @@ This is a project I work on in the evenings, and the initial build and scripting
 
 ---
 
+## What changed in v2
+
+- **One stack, no out-of-tree drivers.** The seeed-voicecard DKMS driver and every workaround it forced (kernel hold, dmix/softvol, audio-init service, `pipewire-alsa` ban) are gone. The kernel updates normally.
+- **Role-based install.** `install.sh` asks for a role and installs only what it needs.
+- **Lighter kiosk.** Raspberry Pi OS **Lite** + `cage` + Chromium. No desktop, no labwc.
+- **Stock PipeWire** for audio. Caldera, `stop-server.py`, the mic-gain entity and the v1 migration script were dropped.
+
 ## Hardware
 
-| Component | Details |
+| Component | Status | Notes |
+|---|---|---|
+| Raspberry Pi 4B (1 GB+) + 7" DSI touchscreen | **Tested** | Backlight auto-detected under `/sys/class/backlight/` |
+| MAX98357A I2S amp + 3 W speaker | **To test** | In-tree `dtoverlay=max98357a`. Mono, playback only |
+| Keyestudio ReSpeaker 2-Mic HAT (KS0314, WM8960) as **speaker amp only** | **Verify on fresh install** | In-tree `dtoverlay=wm8960-soundcard`; HAT mics ignored. Speaker on the XH2.54-2P connector; power the HAT from its micro-USB when driving a speaker |
+| reSpeaker Flex XVF3800 Linear (USB, `_48k2ch` firmware) | **UNTESTED** | Recommended voice board. USB Audio Class, on-board echo cancellation, drives its own speaker |
+| ReSpeaker Lite (USB firmware) | **UNTESTED** | Budget voice board. USB firmware is 16 kHz only — music will sound like a phone call |
+
+### MAX98357A wiring
+
+| MAX98357A | Pi 4 (BCM / physical pin) |
 |---|---|
-| SBC | Raspberry Pi 4B (1 or 2 GB RAM) |
-| Microphone / Audio | KEYESTUDIO ReSpeaker 2-Mic Pi HAT (WM8960 codec) |
-| Display | Raspberry Pi Official 7" DSI Touchscreen |
-| Speaker | 3W 8Ω |
-| OS | Raspberry Pi OS 64-bit (Trixie / Debian 13), kernel 6.12.x |
-| Compositor | labwc (Wayland) |
+| VIN | 5 V (pin 2 or 4) |
+| GND | GND (pin 6) |
+| BCLK | GPIO 18 (pin 12) |
+| LRC | GPIO 19 (pin 35) |
+| DIN | GPIO 21 (pin 40) |
+| SD | GPIO 4 (pin 7) — optional; the overlay drives it to mute the amp when idle. If you leave it unconnected set `MAX98357A_PARAMS=no-sdmode` in the settings file |
 
----
+## Roles
 
-## Features
-
-- **HA Lovelace kiosk** — Chromium in kiosk mode, launches automatically after boot and waits for HA to be reachable before opening
-- **Wake word detection** — OpenWakeWord via Linux Voice Assistant (`hey_jarvis` by default, configurable)
-- **Voice pipeline** — LVA connects to HA via the ESPHome integration; includes mute control directly from HA
-- **Choice of music backend** — install Music Assistant (Sendspin native player, appears automatically in MA 2.7+), Caldera headless (Plex-controlled), or both as independent players
-- **MQTT dashboard refresh** — reload the kiosk page or navigate it to any URL over MQTT; recovers displays after an HA reboot and doubles as a way to push test dashboards
-- **MQTT auto-discovery** — Device registers itself in HA with Voice Volume, Media Volume, Brightness, Mic Sensitivity, a Reload Dashboard button, and a Dashboard URL text box — no YAML needed
-- **Touch scrolling** — Daemon translates touchscreen swipe gestures into scroll-wheel events for labwc/Wayland
-- **Independent volume channels** — TTS/voice and media are separate ALSA softvol streams, each with its own HA slider
-- **Per-device mic tuning** — Mic sensitivity is adjustable from HA, persists across reboots, useful for different room sizes and placements
-
----
-
-## Repo Structure
-
-```
-configure.sh              # Main setup script — run once on a fresh install (idempotent, re-runnable)
-mqtt-bridge.py            # MQTT auto-discovery bridge for HA device entities
-touch-scroll.py           # Touch-to-scroll daemon (uinput virtual device)
-lovelace/
-  smart-display-card.js   # Custom Lovelace card (copy to HA /config/www/)
-ha-configuration.md       # Full HA config reference
-CLAUDE.md                 # Technical reference for AI-assisted development
-```
+| Role | Installs |
+|---|---|
+| `display` | Kiosk + MQTT bridge (brightness, screen on/off, dashboard reload/URL). **With a speaker:** LVA in output-only mode (an HA announcement / TTS media player) and, optionally, sendspin as a Music Assistant player |
+| `voice` (**UNTESTED**) | Everything in `display` + LVA full voice mode on a USB voice board. Wake word on/off; with it off, use the **Start Listening** button in HA (push-to-talk) |
 
 ---
 
@@ -53,271 +52,172 @@ CLAUDE.md                 # Technical reference for AI-assisted development
 
 ### Prerequisites
 
-- Fresh **Raspberry Pi OS 64-bit (Trixie)** install
-- Pi connected to your network
-- Home Assistant running with:
-  - **ESPHome** integration installed
-  - **MQTT integration** (Mosquitto) installed and configured
-  - **Music Assistant 2.7+** (optional, for the Sendspin player)
-  - **Plex** account + a reachable Plex Media Server (optional, for the Caldera player)
+- **Raspberry Pi OS Lite (64-bit)**, Trixie, flashed with Raspberry Pi Imager (set hostname, user, Wi-Fi and enable SSH in the Imager's settings)
+- Home Assistant with the **MQTT** integration (Mosquitto) and discovery enabled
+- **ESPHome** integration (only if the display has a speaker)
+- **Music Assistant 2.7+** (optional)
 
-### 1. Run the configuration script
+### Install
 
-Clone this repo onto the Pi and run the setup script as your normal user (not root):
+SSH in as your normal user, then:
 
 ```bash
+sudo apt-get update && sudo apt-get install -y git
 git clone https://github.com/YOUR_USERNAME/TuneoutDisplay.git
 cd TuneoutDisplay
-chmod +x configure.sh
-./configure.sh
+git checkout v2.0        # until v2 is merged to main
+./install.sh
 ```
 
-The script prompts you for:
-- Device name (used as the HA device name and Music Assistant player name)
-- Home Assistant URL
-- Wake word model name
-- **Music player** — `music-assistant`, `caldera`, or `both`
-- Caldera ALSA output device (only if Caldera is selected — defaults to `seeed_media`)
-- Lovelace kiosk URL (optional — skip to set up kiosk manually later)
-- MQTT broker host, port, username, and password
+The installer asks for: role, device name, dashboard URL, audio output
+(`none` / `max98357a` / `wm8960` / `usb`), speaker volume, Music Assistant
+yes/no, wake word (voice role), and MQTT broker details. It updates the system,
+installs what the role needs, and offers to reboot when a boot setting changed
+(audio overlays need one).
 
-Settings are saved after the first run — re-running the script will pre-fill all prompts with your previous values, so you only need to change what's different.
+Answers are saved to `~/.smart-display-settings` (mode 600). Re-running
+pre-fills them. For a fleet, copy a settings file onto a device and run:
 
-The script installs and configures everything automatically, then offers to reboot when done.
-
-### Kernel is pinned to 6.12
-
-The ReSpeaker driver (`seeed-voicecard`) is an out-of-tree DKMS module that breaks
-on newer kernels — 6.18 changed several ASoC APIs and will fail the build mid-upgrade,
-leaving `apt` half-broken. To keep every display identical and reproducible,
-`configure.sh` holds the kernel at the current **6.12** series before upgrading, so
-re-running the script is always safe. Userspace still gets updates; only the kernel
-is frozen.
-
-This assumes you flash displays from a 6.12-era Raspberry Pi OS image. If a device
-has already moved to a newer kernel, re-image it to bring it back to the standard
-state — an in-place downgrade isn't reliable on Raspberry Pi. To move the whole fleet
-forward later, validate the driver on the new kernel on one device first, then lift
-the hold (`sudo apt-mark unhold linux-image-rpi-v8 …`).
-
-### Music player notes
-
-- **Music Assistant (Sendspin)** needs no extra steps — the player appears in MA 2.7+ automatically and routes through the `seeed_media` softvol device.
-- **Caldera** requires two manual steps the script can't automate, printed at the end of its install section:
-
-  ```bash
-  ~/caldera-music/caldera-music --login          # one-time Plex device login
-  systemctl --user enable --now caldera-music    # start it after logging in
-  ```
-
-  Because Caldera's ALSA-device selection couldn't be verified, the build forces its audio onto your chosen device (default `seeed_media`) via `ALSA_CONFIG_PATH` so it shares the dmix path with voice/TTS. **Verify after first play:** start Plexamp audio and confirm voice/TTS still works simultaneously. If Caldera seizes the card alone, check for a native output-device setting in its config and point it at `seeed_media`. Caldera also self-updates in the background, so its version is not pinned by this build.
-
-### 2. Add the voice assistant to Home Assistant
-
-After reboot, in HA go to:
-
-**Settings → Devices & Services → Add Integration → ESPHome**
-
-| Field | Value |
-|---|---|
-| Host | `<hostname>.local` |
-| Port | `6053` |
-
-Once added, open the device and click **"Set Up Voice Assistant"** to assign it to a voice pipeline (Whisper STT + Piper TTS recommended).
-
-### 3. Verify MQTT device
-
-In HA go to **Settings → Devices & Services → MQTT** and look for your device name. It should appear automatically with these entities:
-
-- Voice Volume (number)
-- Media Volume (number)
-- Brightness (number)
-- Mic Sensitivity (number)
-- Reload Dashboard (button)
-- Dashboard URL (text)
-
-If it doesn't appear, check that MQTT discovery is enabled in the MQTT integration settings.
-
-### 4. Add the Lovelace control card (optional)
-
-The custom card gives you volume, brightness, voice status, and a mute toggle in any HA dashboard.
-
-1. Copy `lovelace/smart-display-card.js` to `/config/www/` on your HA instance
-2. In HA go to **Settings → Dashboards → ⋮ → Resources → Add**
-   - URL: `/local/smart-display-card.js`
-   - Type: JavaScript module
-3. Add the card to a dashboard:
-
-```yaml
-type: custom:smart-display-card
-name: My Display
-satellite_entity: assist_satellite.YOUR_DEVICE
-tts_volume_entity: number.YOUR_DEVICE_tts_volume
-media_volume_entity: number.YOUR_DEVICE_media_volume
-brightness_entity: number.YOUR_DEVICE_brightness
-mute_entity: switch.YOUR_DEVICE_mute        # optional — enables chip tap-to-mute
-mic_gain_entity: number.YOUR_DEVICE_mic_gain  # optional
+```bash
+./install.sh --non-interactive
 ```
 
-Find your exact entity IDs under **Developer Tools → States** and search for your device name.
+Expert settings live only in that file:
 
-The status chip in the card header shows the current pipeline state (Standby / Listening / Responding / Muted) and acts as a mute toggle when `mute_entity` is configured — tap to mute, tap again to unmute.
+| Setting | Default | Purpose |
+|---|---|---|
+| `CHROMIUM_EXTRA_FLAGS` | empty | Extra Chromium flags, e.g. `--enable-gpu-rasterization --ignore-gpu-blocklist` (check `chrome://gpu`) |
+| `TOUCH_SCROLL` | `no` | Re-enable v1's touch→scroll daemon if native touch scrolling doesn't work |
+| `MAX98357A_PARAMS` | empty | Overlay params, e.g. `no-sdmode` |
+| `LVA_VERSION` | `v1.1.16` | Pinned Linux Voice Assistant tag |
+| `SENDSPIN_VERSION` | `8.0.0` | Pinned sendspin version |
+| `ALLOW_UNTESTED` | `no` | Must be `yes` to install the voice role non-interactively |
 
-### 5. Add swipe navigation between dashboard views (optional)
+### In Home Assistant
 
-Install **Swipe Navigation** from HACS (Frontend section), then add `/hacsfiles/swipe-navigation/swipe-navigation.js` as a Lovelace resource. No card config needed — it activates automatically on all views.
+1. **MQTT** — the device appears automatically under Settings → Devices & Services → MQTT.
+2. **ESPHome** (speaker only) — Add Integration → ESPHome → host `<hostname>.local`, port `6053`. In the display role the device is a media player you can target with `tts.speak` and announcements; in the voice role, click **Set Up Voice Assistant**.
+3. **Music Assistant** (optional) — the player appears automatically.
+
+Device-specific YAML is written to `~/smart-display-setup.md` on every run.
 
 ---
 
-## Dashboard refresh (MQTT)
+## MQTT entities
 
-The kiosk Chromium launches with `--remote-debugging-port=9222`, and the MQTT
-bridge drives it over the Chrome DevTools Protocol. This lets you reload the page
-or send it to a new URL without unplugging anything — the original reason being
-that displays lose their HA connection during an HA update and otherwise need a
-physical reboot.
+Registered only for what the role installed. Entities a role doesn't use (and v1's retired volume/mic entities) are removed from HA automatically.
 
-Two HA entities are created automatically: a **Reload Dashboard** button and a
-**Dashboard URL** text box. You can also publish to the raw command topic:
+| Entity | When | Backend |
+|---|---|---|
+| Brightness (number, 0–100) | always | backlight `brightness` (0 turns the panel off) |
+| Screen (switch) | always | backlight `bl_power` |
+| Reload Dashboard (button) | always | Chromium `Page.reload` over CDP |
+| Dashboard URL (text) | always | Chromium `Page.navigate` over CDP |
+| Speaker Volume (number, 0–100) | speaker present | PipeWire master (`wpctl`), restored at boot |
+| Start Listening (button) | voice role | LVA peripheral API `start_listening` |
+
+### Volume model
+
+- **Speaker Volume** (MQTT) is the master level for everything.
+- **LVA's media player** (ESPHome) has its own volume for TTS / announcements.
+- **Music Assistant** sets the sendspin player's volume (software volume — it never moves the master).
+
+### Dashboard refresh
+
+Both dashboard entities publish to `smart-display/<device_id>/dashboard/set`:
 
 ```
-Topic:   smart-display/<device_id>/dashboard/set
-Payloads:
-  reload                      reload the current page (ignores cache)
-  home                        navigate back to the configured kiosk URL
-  http://homeassistant.local:8123/lovelace/test   navigate to any URL
+reload                         reload the current page (ignores cache)
+home                           go back to the configured dashboard URL
+http(s)://…                    navigate to that URL
 ```
 
-Example with mosquitto_pub:
-
-```bash
-mosquitto_pub -h <broker> -u <user> -P <pass> \
-  -t 'smart-display/<device_id>/dashboard/set' -m reload
-```
-
-**Recovering automatically after an HA reboot.** If your broker is HA's Mosquitto
-add-on, it is also offline during the reboot, so the reload must fire *after* HA
-returns. Add an HA automation that reloads the displays on startup:
+HA's Mosquitto add-on goes down with HA, so trigger the reload from HA once it's back:
 
 ```yaml
 automation:
   - alias: "Reload smart displays after HA restart"
-    trigger:
-      - platform: homeassistant
+    triggers:
+      - trigger: homeassistant
         event: start
-    action:
-      - delay: "00:00:30"          # give the frontend time to come up
+    actions:
+      - delay: "00:00:30"
       - action: button.press
         target:
-          entity_id: button.<device_id>_dashboard_reload
+          entity_id: button.<device_id>_reload_dashboard
 ```
 
-> The debugging port binds to localhost only, but the build adds
-> `--remote-allow-origins=*` so the local bridge can complete the WebSocket
-> handshake. Anyone with shell access to the Pi could drive the browser — fine
-> for a kiosk appliance on a trusted LAN, worth noting if your threat model is
-> stricter.
+Chromium's debugging port listens on `127.0.0.1` only. Anyone with a shell on the Pi can drive the browser — fine for a kiosk on a trusted LAN.
+
+---
+
+## Lovelace card
+
+1. Copy `lovelace/smart-display-card.js` to `/config/www/` on HA.
+2. Settings → Dashboards → ⋮ → Resources → Add: `/local/smart-display-card.js` (JavaScript module).
+3. Add a card. Every entity is optional — rows show only for what you list:
+
+```yaml
+type: custom:smart-display-card
+name: Kitchen Display
+brightness_entity: number.kitchen_display_brightness
+screen_entity: switch.kitchen_display_screen
+speaker_volume_entity: number.kitchen_display_speaker_volume   # speaker present
+media_player_entity: media_player.kitchen_display_media_player # LVA volume
+satellite_entity: assist_satellite.kitchen_display             # voice role
+mute_entity: switch.kitchen_display_mute                       # voice role
+talk_entity: button.kitchen_display_start_listening            # voice role
+```
+
+The brightness slider stops at 5 % so a stray drag can't black the screen; automations can still use 0.
 
 ---
 
 ## Services
 
-All services are managed by systemd and start automatically on boot.
+| Service | When | What |
+|---|---|---|
+| `tuneout-kiosk` | always | cage + Chromium on tty1; waits for HA before opening the dashboard |
+| `smart-display-mqtt` | always | MQTT discovery bridge |
+| `linux-voice-assistant` | speaker present | LVA — output-only (display) or full (voice) |
+| `sendspin` | speaker + Music Assistant | Music Assistant player |
+| `smart-display-touch-scroll` | `TOUCH_SCROLL=yes` | v1 touch→scroll fallback |
 
-| Service | Description |
-|---|---|
-| `linux-voice-assistant` | Wake word detection and voice pipeline (ESPHome protocol) |
-| `sendspin` | Music Assistant native player (only if music player is `music-assistant`/`both`) |
-| `caldera-music` (user) | Caldera headless Plex player (only if music player is `caldera`/`both`; runs as a `--user` service) |
-| `smart-display-audio-init` | Restores ALSA mixer state after seeed DKMS module loads |
-| `smart-display-mqtt` | MQTT bridge for HA auto-discovery + dashboard refresh |
-| `smart-display-touch-scroll` | Translates touchscreen swipe gestures into scroll-wheel events |
-
-Check all service status:
-```bash
-sudo systemctl status linux-voice-assistant sendspin \
-  smart-display-audio-init smart-display-mqtt smart-display-touch-scroll
-```
-
-Follow live voice pipeline logs:
-```bash
-journalctl -u linux-voice-assistant -f
-```
-
----
-
-## Audio Architecture
-
-```
-Hardware: WM8960 (seeed2micvoicec)
-           │
-           ▼
-      seeed_dmix         ← ALSA dmix (allows multiple simultaneous writers)
-           │
-      seeed_shared       ← plug over dmix (general use)
-         ┌─┴─┐
-   seeed_tts  seeed_media     ← softvol streams (independent volume controls)
-       │           │
-   LVA / mpv    Sendspin
-  (voice/TTS)   (music)
-```
-
-Volume controls:
-- **TTS Volume** — `amixer -c seeed2micvoicec cset "name=TTS Volume" 80%`
-- **Media Volume** — `amixer -c seeed2micvoicec cset "name=Media Volume" 80%`
-
-> **Note:** `pipewire-alsa` must not be installed — it intercepts ALSA calls at the library level and prevents dmix from working. The setup script explicitly removes it. PipeWire is used only for microphone input.
-
----
-
-## Customisation
-
-### Wake word
-
-Re-run `./configure.sh` and enter a different wake word model name at the prompt. Supported models include `hey_jarvis`, `ok_nabu`, `hey_mycroft`, and others from OpenWakeWord.
-
-### Mic sensitivity
-
-Adjust the **Mic Sensitivity** slider in HA (the MQTT entity). Higher values boost the microphone preamplifier, improving far-field wake word detection. The value persists across reboots. Default is 63% (0 dB on the WM8960 Capture PGA).
-
-### Touch scroll speed
-
-Edit `/usr/local/bin/touch-scroll.py` and adjust `TICKS_PER_SCREEN` (higher = faster scroll), then restart the service:
+Config: `/etc/smart-display/*.env`. Settings: `~/.smart-display-settings`.
 
 ```bash
-sudo systemctl restart smart-display-touch-scroll
+sudo systemctl status tuneout-kiosk smart-display-mqtt linux-voice-assistant sendspin
+journalctl -u tuneout-kiosk -f
 ```
 
-### Kiosk URL
+## Audio architecture
 
-Re-run `./configure.sh` and enter a new kiosk URL at the prompt, or edit `~/.config/labwc/autostart` directly.
+```
+LVA (mpv) ──┐
+            ├──► PipeWire (mixes) ──► default sink ──► MAX98357A / WM8960 / USB board
+sendspin ───┘    (pipewire-alsa routes plain-ALSA apps in)
+```
+
+When an output is selected, the installer turns off the Pi's onboard audio
+(`dtparam=audio=off`, `vc4-kms-v3d,noaudio`) so the chosen device is the only
+sink and becomes the default without extra config. In the display role a silent
+virtual mic is added for LVA, which opens a microphone even in output-only mode.
 
 ---
 
 ## Troubleshooting
 
-**Audio settings don't persist after reboot**
-The seeed DKMS module loads after `alsa-restore` runs. The `smart-display-audio-init` service handles this — check its status and logs. Speaker volume is also re-applied in `~/.config/labwc/autostart` as a safety net.
+**Black screen after boot** — the kiosk waits until the dashboard's host answers. Check `journalctl -u tuneout-kiosk -b` and that the Pi can reach HA (`curl -I <dashboard URL>`).
 
-**"No MCLK configured" in dmesg / aplay fails**
-The seeed-voicecard DKMS module was built for a different kernel than the one currently running (common after `apt full-upgrade`). Fix:
-```bash
-sudo dkms build -m seeed-voicecard -v 0.3 -k $(uname -r) --force
-sudo dkms install -m seeed-voicecard -v 0.3 -k $(uname -r) --force
-sudo reboot
-```
+**No sound** — `aplay -l` should list your card (reboot after choosing an output). `wpctl status` should show it as the default sink. `speaker-test -c2 -t wav` plays through PipeWire.
 
-**MQTT entities don't appear in HA**
-- Check credentials in `/etc/smart-display/mqtt.env`
-- Verify MQTT discovery is enabled in HA's MQTT integration settings
-- Check `journalctl -u smart-display-mqtt -f` for connection errors
+**WM8960 card present but silent** — check `amixer -c wm8960soundcard` shows *Left/Right Output Mixer PCM* on and *Speaker* up. `sudo /usr/local/sbin/tuneout-wm8960-mixer` re-applies them. The in-tree overlay assumes a 12.288 MHz codec clock (Waveshare); if playback is silent or the wrong pitch on the Keyestudio HAT, use the MAX98357A instead.
 
-**Voice assistant not discovered by HA after reboot**
-Ensure the ESPHome integration is installed in HA and add the device via **Settings → Devices & Services → ESPHome** using `<hostname>.local` port `6053`.
+**MQTT entities missing** — check `/etc/smart-display/mqtt.env`, that discovery is enabled in HA, and `journalctl -u smart-display-mqtt -f`.
 
-**Touch scrolling not working**
-Check the daemon is running: `systemctl status smart-display-touch-scroll`
-View logs: `journalctl -u smart-display-touch-scroll -f`
+**Touch doesn't scroll** — set `TOUCH_SCROLL=yes` in `~/.smart-display-settings` and re-run `./install.sh --non-interactive`.
+
+More checks: the `diagnose-display` skill (`.claude/skills/diagnose-display/SKILL.md`).
 
 ---
 

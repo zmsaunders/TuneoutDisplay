@@ -1,45 +1,56 @@
 #!/usr/bin/env python3
 """
-Smart Display MQTT Bridge
+TuneoutDisplay MQTT bridge (v2).
 
-Registers the Smart Display as a native Home Assistant device via MQTT
-discovery. HA automatically creates volume and brightness slider entities
-plus a Stop TTS button — no rest_command or input_number YAML required.
+Registers the display as a Home Assistant device via MQTT discovery. Which
+entities exist depends on the role the installer chose (FEATURES):
 
-Entities created in HA:
-  number  → Voice Volume     (controls Wyoming/TTS playback via seeed_tts softvol)
-  number  → Media Volume     (controls Music Assistant playback via seeed_media softvol)
-  number  → Brightness       (controls DSI backlight)
-  number  → Mic Sensitivity  (WM8960 Capture PGA gain)
-  button  → Reload Dashboard (reloads the kiosk page over CDP)
-  text    → Dashboard URL    (navigates the kiosk to any URL over CDP)
+  brightness      number  Display backlight 0–100 % (min 0 so automations can
+                          turn it fully off)
+  screen          switch  Backlight power on/off (bl_power)
+  dashboard       button  Reload Dashboard  ─┐ share …/dashboard/set
+                  text    Dashboard URL     ─┘ (driven over Chrome DevTools)
+  speaker_volume  number  Master output volume (PipeWire default sink)
+  talk            button  Start listening (LVA peripheral API) — voice role
 
-Configuration (set via systemd environment / EnvironmentFile):
-  MQTT_HOST      Broker hostname or IP   (default: homeassistant.local)
-  MQTT_PORT      Broker port             (default: 1883)
-  MQTT_USERNAME  Broker username         (default: empty)
-  MQTT_PASSWORD  Broker password         (default: empty)
-  DEVICE_NAME    Human-readable name     (default: Smart Display)
-  DEVICE_ID      Unique slug for topics  (default: derived from hostname)
+Entities for features that are off — and v1's retired entities (tts_volume,
+media_volume, mic_gain) — are removed from HA by publishing an empty config.
+
+Per-stream volume is not handled here on purpose: LVA exposes its own media
+player (with volume) to HA over ESPHome, and Music Assistant controls the
+sendspin player's volume. This bridge only owns the master level.
+
+Configuration (systemd EnvironmentFile /etc/smart-display/mqtt.env):
+  MQTT_HOST, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD
+  DEVICE_NAME, DEVICE_ID
+  DASHBOARD_URL, CDP_PORT
+  FEATURES                 comma list of the features above
+  DEFAULT_SPEAKER_VOLUME   used until a level has been set from HA
+  PERIPHERAL_PORT          LVA peripheral WebSocket port (default 6055)
+  BACKLIGHT_DEVICE         optional; auto-detected from /sys/class/backlight
 """
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
-# websocket-client (Debian: python3-websocket) — used to drive Chromium over the
-# Chrome DevTools Protocol for the dashboard reload / navigate commands. Optional
-# so the bridge still runs (minus that feature) if the package is missing.
+# websocket-client (Debian: python3-websocket) — used for Chromium (CDP) and
+# the LVA peripheral API. Optional so the bridge still runs without it.
 try:
     import websocket  # type: ignore
 except Exception:  # pragma: no cover
     websocket = None
+
+SW_VERSION = "2.0"
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 MQTT_HOST     = os.getenv("MQTT_HOST",     "homeassistant.local")
@@ -47,212 +58,230 @@ MQTT_PORT     = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 DEVICE_NAME   = os.getenv("DEVICE_NAME",   "Smart Display")
-DEVICE_ID     = os.getenv("DEVICE_ID",
-                    os.uname().nodename.lower().replace("-", "_"))
-
-# Dashboard refresh: the kiosk Chromium is launched with --remote-debugging-port
-# so the bridge can reload it or navigate it to a new URL over CDP — e.g. to
-# recover the display after Home Assistant reboots, or to push a test dashboard.
+DEVICE_ID     = os.getenv("DEVICE_ID") or re.sub(r"[^a-z0-9_]", "_", os.uname().nodename.lower())
 CDP_PORT      = int(os.getenv("CDP_PORT", "9222"))
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")  # the device's configured kiosk URL
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")
+PERIPHERAL_PORT = int(os.getenv("PERIPHERAL_PORT", "6055"))
+FEATURES      = {f.strip() for f in os.getenv("FEATURES", "brightness,screen,dashboard").split(",") if f.strip()}
+DEFAULT_SPEAKER_VOLUME = int(os.getenv("DEFAULT_SPEAKER_VOLUME", "80"))
 
-# ── State file paths ───────────────────────────────────────────────────────────
-HOME           = Path.home()
-TTS_VOL_FILE   = HOME / ".smart-display-tts-volume"
-MEDIA_VOL_FILE = HOME / ".smart-display-media-volume"
-MIC_GAIN_FILE  = HOME / ".smart-display-mic-gain"
-BACKLIGHT_DIR  = Path("/sys/class/backlight/10-0045")
+SPEAKER_VOL_FILE = Path.home() / ".smart-display-speaker-volume"
 
-# WM8960 Capture PGA gain range (numid=1): ALSA values 0–63.
-# 0 = minimum gain (~-17 dB),  63 = maximum gain (+30 dB),  40 = 0 dB default.
-MIC_GAIN_ALSA_MAX = 63
 
-# ── MQTT topic helpers ─────────────────────────────────────────────────────────
+def _find_backlight() -> Path | None:
+    name = os.getenv("BACKLIGHT_DEVICE")  # a device name, or an absolute path
+    if name:
+        return Path(name) if name.startswith("/") else Path("/sys/class/backlight") / name
+    devices = sorted(Path("/sys/class/backlight").glob("*"))
+    return devices[0] if devices else None
+
+
+BACKLIGHT_DIR = _find_backlight()
+if BACKLIGHT_DIR is None:
+    print("[backlight] No /sys/class/backlight device — brightness/screen disabled.")
+    FEATURES -= {"brightness", "screen"}
+
+# ── MQTT topics ────────────────────────────────────────────────────────────────
 BASE = f"smart-display/{DEVICE_ID}"
 AVAIL_TOPIC = f"{BASE}/availability"
 
-def state_topic(entity:   str) -> str: return f"{BASE}/{entity}/state"
-def command_topic(entity: str) -> str: return f"{BASE}/{entity}/set"
+
+def state_topic(entity: str) -> str:
+    return f"{BASE}/{entity}/state"
+
+
+def command_topic(entity: str) -> str:
+    return f"{BASE}/{entity}/set"
+
+
 def config_topic(component: str, entity: str) -> str:
     return f"homeassistant/{component}/{DEVICE_ID}/{entity}/config"
 
-# ── Shared device descriptor ───────────────────────────────────────────────────
+
 DEVICE = {
     "identifiers":  [DEVICE_ID],
     "name":         DEVICE_NAME,
-    "model":        "Smart Display",
+    "model":        "TuneoutDisplay",
     "manufacturer": "DIY",
-    "sw_version":   "1.0",
+    "sw_version":   SW_VERSION,
 }
 
-# ── Discovery payload builders ─────────────────────────────────────────────────
-def _number(entity_id: str, name: str, icon: str,
-            min_: int = 0, max_: int = 100, step: int = 5) -> dict:
+COMMON = {
+    "device":                DEVICE,
+    "availability_topic":    AVAIL_TOPIC,
+    "payload_available":     "online",
+    "payload_not_available": "offline",
+}
+
+
+def _number(entity: str, name: str, icon: str) -> dict:
     return {
-        "name":                  name,
-        "unique_id":             f"{DEVICE_ID}_{entity_id}",
-        "device":                DEVICE,
-        "state_topic":           state_topic(entity_id),
-        "command_topic":         command_topic(entity_id),
-        "min":                   min_,
-        "max":                   max_,
-        "step":                  step,
-        "unit_of_measurement":   "%",
-        "icon":                  icon,
-        "availability_topic":    AVAIL_TOPIC,
-        "payload_available":     "online",
-        "payload_not_available": "offline",
-        "retain":                True,
-        "optimistic":            False,
+        **COMMON,
+        "name":                name,
+        "unique_id":           f"{DEVICE_ID}_{entity}",
+        "state_topic":         state_topic(entity),
+        "command_topic":       command_topic(entity),
+        "min":                 0,
+        "max":                 100,
+        "step":                5,
+        "unit_of_measurement": "%",
+        "icon":                icon,
+        "retain":              True,
     }
 
-# All discovery registrations: (config_topic, payload)
-DISCOVERY = [
-    (config_topic("number", "tts_volume"),
-     _number("tts_volume",   "Voice Volume", "mdi:account-voice")),
 
-    (config_topic("number", "media_volume"),
-     _number("media_volume", "Media Volume", "mdi:music")),
+# (feature, component, entity_id, payload). Each entity belongs to a feature.
+ENTITIES = [
+    ("brightness", "number", "brightness",
+     _number("brightness", "Brightness", "mdi:brightness-6")),
 
-    (config_topic("number", "brightness"),
-     _number("brightness",   "Brightness",   "mdi:brightness-6", min_=0)),
-
-    (config_topic("number", "mic_gain"),
-     _number("mic_gain",     "Mic Sensitivity", "mdi:microphone-settings")),
-
-    # Dashboard refresh — a button that reloads the kiosk page, and a text box
-    # to navigate it to any URL. Both publish to the shared "dashboard" command
-    # topic; the bridge drives Chromium over CDP. Handy after an HA reboot or to
-    # push a test dashboard to the screen.
-    (config_topic("button", "dashboard_reload"), {
-        "name":                  "Reload Dashboard",
-        "unique_id":             f"{DEVICE_ID}_dashboard_reload",
-        "device":                DEVICE,
-        "command_topic":         command_topic("dashboard"),
-        "payload_press":         "reload",
-        "icon":                  "mdi:refresh",
-        "availability_topic":    AVAIL_TOPIC,
-        "payload_available":     "online",
-        "payload_not_available": "offline",
+    ("screen", "switch", "screen", {
+        **COMMON,
+        "name":          "Screen",
+        "unique_id":     f"{DEVICE_ID}_screen",
+        "state_topic":   state_topic("screen"),
+        "command_topic": command_topic("screen"),
+        "payload_on":    "ON",
+        "payload_off":   "OFF",
+        "icon":          "mdi:monitor",
+        "retain":        True,
     }),
 
-    (config_topic("text", "dashboard_url"), {
-        "name":                  "Dashboard URL",
-        "unique_id":             f"{DEVICE_ID}_dashboard_url",
-        "device":                DEVICE,
-        "command_topic":         command_topic("dashboard"),
-        "state_topic":           state_topic("dashboard_url"),
-        "mode":                  "text",
-        "min":                   0,
-        "max":                   255,
-        "icon":                  "mdi:link-variant",
-        "availability_topic":    AVAIL_TOPIC,
-        "payload_available":     "online",
-        "payload_not_available": "offline",
+    ("dashboard", "button", "dashboard_reload", {
+        **COMMON,
+        "name":          "Reload Dashboard",
+        "unique_id":     f"{DEVICE_ID}_dashboard_reload",
+        "command_topic": command_topic("dashboard"),
+        "payload_press": "reload",
+        "icon":          "mdi:refresh",
     }),
 
+    ("dashboard", "text", "dashboard_url", {
+        **COMMON,
+        "name":          "Dashboard URL",
+        "unique_id":     f"{DEVICE_ID}_dashboard_url",
+        "command_topic": command_topic("dashboard"),
+        "state_topic":   state_topic("dashboard_url"),
+        "mode":          "text",
+        "min":           0,
+        "max":           255,
+        "icon":          "mdi:link-variant",
+    }),
+
+    ("speaker_volume", "number", "speaker_volume",
+     _number("speaker_volume", "Speaker Volume", "mdi:volume-high")),
+
+    ("talk", "button", "talk", {
+        **COMMON,
+        "name":          "Start Listening",
+        "unique_id":     f"{DEVICE_ID}_talk",
+        "command_topic": command_topic("talk"),
+        "payload_press": "PRESS",
+        "icon":          "mdi:microphone-message",
+    }),
 ]
 
-COMMAND_TOPICS = {command_topic(e) for e in
-                  ("tts_volume", "media_volume", "brightness", "mic_gain",
-                   "dashboard")}
+# v1 entities that no longer exist — cleared from HA on connect.
+RETIRED = [("number", "tts_volume"), ("number", "media_volume"), ("number", "mic_gain")]
 
-# ── Hardware helpers ───────────────────────────────────────────────────────────
-def _read_state(path: Path, default: int) -> int:
-    try:
-        return max(0, min(100, int(path.read_text().strip())))
-    except (OSError, ValueError):
-        return default
+# ── Backlight ──────────────────────────────────────────────────────────────────
+def _bl_read(attr: str) -> int:
+    return int((BACKLIGHT_DIR / attr).read_text().strip())
 
-def _write_state(path: Path, value: int) -> None:
+
+def _bl_write(attr: str, value: int) -> None:
     try:
-        path.write_text(str(value))
+        (BACKLIGHT_DIR / attr).write_text(str(value))
     except OSError as e:
-        print(f"[state] Write failed {path}: {e}")
+        print(f"[backlight] Write {attr} failed: {e}")
 
-def _read_brightness_pct() -> int:
+
+def read_brightness_pct() -> int:
     try:
-        max_b    = int((BACKLIGHT_DIR / "max_brightness").read_text().strip())
-        current  = int((BACKLIGHT_DIR / "brightness").read_text().strip())
-        return max(0, min(100, round(current * 100 / max_b)))
-    except OSError:
+        return max(0, min(100, round(_bl_read("brightness") * 100 / _bl_read("max_brightness"))))
+    except (OSError, ValueError, ZeroDivisionError):
         return 100
 
-def _set_alsa(control: str, level: int) -> None:
-    # softvol controls are raw mixer elements — not visible to sset (simple
-    # mixer). cset with name= reaches them directly.
-    r = subprocess.run(
-        ["/usr/bin/amixer", "-c", "seeed2micvoicec", "cset", f"name={control}", f"{level}%"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        print(f"[alsa] Error setting '{control}': {r.stderr.strip()}")
 
-def _read_mic_gain_pct() -> int:
-    """Read current WM8960 Capture PGA gain and return as 0–100%."""
-    r = subprocess.run(
-        ["/usr/bin/amixer", "-c", "seeed2micvoicec", "cget", "numid=1"],
-        capture_output=True, text=True,
-    )
-    if r.returncode == 0:
-        for line in r.stdout.splitlines():
-            if "values=" in line:
-                try:
-                    raw = int(line.split("values=")[1].split(",")[0].strip())
-                    return max(0, min(100, round(raw * 100 / MIC_GAIN_ALSA_MAX)))
-                except (ValueError, IndexError):
-                    pass
-    return _read_state(MIC_GAIN_FILE, 63)
-
-def _set_mic_gain(level_pct: int) -> None:
-    """Set WM8960 Capture PGA gain from 0–100% (maps to ALSA 0–63)."""
-    alsa_val = round(level_pct * MIC_GAIN_ALSA_MAX / 100)
-    r = subprocess.run(
-        ["/usr/bin/amixer", "-c", "seeed2micvoicec", "cset", "numid=1",
-         f"{alsa_val},{alsa_val}"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        print(f"[alsa] Error setting mic gain: {r.stderr.strip()}")
-
-def _set_brightness(level: int) -> None:
+def set_brightness_pct(level: int) -> None:
     try:
-        max_b = int((BACKLIGHT_DIR / "max_brightness").read_text().strip())
-        (BACKLIGHT_DIR / "brightness").write_text(str(int(level * max_b / 100)))
-    except OSError as e:
+        _bl_write("brightness", round(level * _bl_read("max_brightness") / 100))
+    except (OSError, ValueError) as e:
         print(f"[backlight] Error: {e}")
 
-# ── Chromium control (Chrome DevTools Protocol) ────────────────────────────────
-# Chromium is launched in the kiosk with --remote-debugging-port=CDP_PORT, so we
-# can reload it or navigate it without touching the Wayland session. This is the
-# recovery path when HA reboots and the displays are left on a dead page.
 
-def _cdp_ws_url() -> str | None:
-    """Return the WebSocket debugger URL for the active kiosk page, or None."""
-    with urllib.request.urlopen(
-            f"http://127.0.0.1:{CDP_PORT}/json", timeout=3) as r:
-        targets = json.loads(r.read().decode())
-    for t in targets:
-        if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
-            return t["webSocketDebuggerUrl"]
-    return None
+def read_screen_on() -> bool:
+    try:
+        return _bl_read("bl_power") == 0
+    except (OSError, ValueError):
+        return True
 
+
+def set_screen_on(on: bool) -> None:
+    _bl_write("bl_power", 0 if on else 4)  # FB_BLANK_UNBLANK / FB_BLANK_POWERDOWN
+
+# ── Speaker volume (PipeWire default sink via wpctl) ───────────────────────────
+def _wpctl(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["wpctl", *args], capture_output=True, text=True, timeout=5)
+
+
+def read_speaker_volume() -> int | None:
+    try:
+        r = _wpctl("get-volume", "@DEFAULT_AUDIO_SINK@")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"Volume:\s*([0-9.]+)", r.stdout)
+    return round(float(m.group(1)) * 100) if (r.returncode == 0 and m) else None
+
+
+def set_speaker_volume(level: int) -> bool:
+    try:
+        r = _wpctl("set-volume", "@DEFAULT_AUDIO_SINK@", f"{level / 100:.2f}")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"[speaker] wpctl failed: {e}")
+        return False
+    if r.returncode != 0:
+        print(f"[speaker] wpctl: {r.stderr.strip() or r.stdout.strip()}")
+    return r.returncode == 0
+
+
+def saved_speaker_volume() -> int:
+    try:
+        return max(0, min(100, int(SPEAKER_VOL_FILE.read_text().strip())))
+    except (OSError, ValueError):
+        return DEFAULT_SPEAKER_VOLUME
+
+
+def restore_speaker_volume() -> None:
+    """At boot PipeWire may come up after us; retry until the sink exists."""
+    level = saved_speaker_volume()
+    for _ in range(60):
+        if read_speaker_volume() is not None and set_speaker_volume(level):
+            print(f"[speaker] Restored {level}%.")
+            client.publish(state_topic("speaker_volume"), str(level), retain=True)
+            return
+        time.sleep(2)
+    print("[speaker] No PipeWire sink after 2 min — volume not restored.")
+
+# ── Chromium (Chrome DevTools Protocol) ────────────────────────────────────────
 def _cdp_send(method: str, params: dict | None = None) -> bool:
-    """Send a single CDP command to the kiosk page. Returns True on success."""
     if websocket is None:
-        print("[cdp] python3-websocket not installed — cannot drive Chromium.")
+        print("[cdp] python3-websocket not installed.")
         return False
     try:
-        ws_url = _cdp_ws_url()
+        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json", timeout=3) as r:
+            targets = json.loads(r.read().decode())
+        ws_url = next((t["webSocketDebuggerUrl"] for t in targets
+                       if t.get("type") == "page" and t.get("webSocketDebuggerUrl")), None)
     except Exception as e:
-        print(f"[cdp] Chromium debug endpoint unreachable on :{CDP_PORT} ({e}).")
+        print(f"[cdp] Debug endpoint unreachable on :{CDP_PORT} ({e}).")
         return False
     if not ws_url:
-        print("[cdp] No page target on Chromium debug endpoint.")
+        print("[cdp] No page target.")
         return False
     try:
-        ws = websocket.create_connection(
-            ws_url, timeout=5, origin=f"http://127.0.0.1:{CDP_PORT}")
+        # No Origin header: Chromium accepts that without --remote-allow-origins.
+        ws = websocket.create_connection(ws_url, timeout=5, suppress_origin=True)
         ws.send(json.dumps({"id": 1, "method": method, "params": params or {}}))
         ws.recv()
         ws.close()
@@ -261,144 +290,157 @@ def _cdp_send(method: str, params: dict | None = None) -> bool:
         print(f"[cdp] {method} failed: {e}")
         return False
 
-def _handle_dashboard(client, payload: str) -> None:
-    """Interpret a dashboard command payload and drive Chromium accordingly.
 
-      ''/'reload'/'refresh' → reload the current page (ignoring cache)
-      'home'                → navigate back to the configured kiosk URL
-      'http(s)://…'         → navigate to that URL (e.g. a test dashboard)
-    """
+def handle_dashboard(payload: str) -> None:
+    """''/reload/refresh → reload; home → DASHBOARD_URL; http(s)://… → navigate."""
     cmd = payload.strip()
     low = cmd.lower()
     if low in ("", "reload", "refresh"):
         ok = _cdp_send("Page.reload", {"ignoreCache": True})
         print(f"[dashboard] reload → {'ok' if ok else 'failed'}")
-    elif low == "home":
-        if not DASHBOARD_URL:
-            print("[dashboard] 'home' requested but DASHBOARD_URL is empty.")
-            return
-        ok = _cdp_send("Page.navigate", {"url": DASHBOARD_URL})
-        if ok:
-            client.publish(state_topic("dashboard_url"), DASHBOARD_URL, retain=True)
-        print(f"[dashboard] home → {DASHBOARD_URL} ({'ok' if ok else 'failed'})")
-    elif low.startswith("http://") or low.startswith("https://"):
-        ok = _cdp_send("Page.navigate", {"url": cmd})
-        if ok:
-            client.publish(state_topic("dashboard_url"), cmd, retain=True)
-        print(f"[dashboard] navigate → {cmd} ({'ok' if ok else 'failed'})")
-    else:
-        print(f"[dashboard] ignored unrecognised payload: {cmd!r}")
-
-# ── MQTT callbacks ─────────────────────────────────────────────────────────────
-def on_connect(client, userdata, connect_flags, reason_code, properties):
-    if reason_code.is_failure:
-        print(f"[mqtt] Connection failed: {reason_code} — will retry.")
         return
+    if low == "home":
+        url = DASHBOARD_URL
+    elif low.startswith(("http://", "https://")):
+        url = cmd
+    else:
+        print(f"[dashboard] Ignored payload: {cmd!r}")
+        return
+    if not url:
+        print("[dashboard] 'home' requested but DASHBOARD_URL is empty.")
+        return
+    ok = _cdp_send("Page.navigate", {"url": url})
+    if ok:
+        client.publish(state_topic("dashboard_url"), url, retain=True)
+    print(f"[dashboard] navigate → {url} ({'ok' if ok else 'failed'})")
 
+# ── LVA peripheral API (push-to-talk) ──────────────────────────────────────────
+def lva_command(command: str) -> None:
+    if websocket is None:
+        print("[lva] python3-websocket not installed.")
+        return
+    try:
+        ws = websocket.create_connection(f"ws://127.0.0.1:{PERIPHERAL_PORT}", timeout=5,
+                                         suppress_origin=True)
+        ws.send(json.dumps({"command": command}))
+        ws.close()
+        print(f"[lva] {command} sent.")
+    except Exception as e:
+        print(f"[lva] {command} failed: {e}")
+
+# ── MQTT ───────────────────────────────────────────────────────────────────────
+def _pct(payload: str) -> int | None:
+    try:
+        return max(0, min(100, int(float(payload))))
+    except ValueError:
+        return None
+
+
+def on_connect(client, userdata, flags, reason_code, properties):
+    if reason_code.is_failure:
+        print(f"[mqtt] Connection failed: {reason_code} — retrying.")
+        return
     print(f"[mqtt] Connected to {MQTT_HOST}:{MQTT_PORT} as '{DEVICE_ID}'.")
-
-    # Mark device online
     client.publish(AVAIL_TOPIC, "online", retain=True)
 
-    # Register all entities via MQTT discovery
-    for topic, payload in DISCOVERY:
-        client.publish(topic, json.dumps(payload), retain=True)
+    # Register enabled entities; clear disabled and retired ones.
+    for feature, component, entity, payload in ENTITIES:
+        topic = config_topic(component, entity)
+        client.publish(topic, json.dumps(payload) if feature in FEATURES else "", retain=True)
+    for component, entity in RETIRED:
+        client.publish(config_topic(component, entity), "", retain=True)
 
-    # Publish current state so HA sliders reflect actual values immediately
-    client.publish(state_topic("tts_volume"),   str(_read_state(TTS_VOL_FILE,   90)), retain=True)
-    client.publish(state_topic("media_volume"), str(_read_state(MEDIA_VOL_FILE, 75)), retain=True)
-    client.publish(state_topic("brightness"),   str(_read_brightness_pct()),           retain=True)
-    client.publish(state_topic("mic_gain"),     str(_read_mic_gain_pct()),             retain=True)
-    client.publish(state_topic("dashboard_url"), DASHBOARD_URL,                         retain=True)
+    if "brightness" in FEATURES:
+        client.publish(state_topic("brightness"), str(read_brightness_pct()), retain=True)
+    if "screen" in FEATURES:
+        client.publish(state_topic("screen"), "ON" if read_screen_on() else "OFF", retain=True)
+    if "dashboard" in FEATURES:
+        client.publish(state_topic("dashboard_url"), DASHBOARD_URL, retain=True)
+    if "speaker_volume" in FEATURES:
+        vol = read_speaker_volume()
+        client.publish(state_topic("speaker_volume"),
+                       str(vol if vol is not None else saved_speaker_volume()), retain=True)
 
-    # Subscribe to all command topics
-    for topic in COMMAND_TOPICS:
-        client.subscribe(topic)
-
-    print("[mqtt] Discovery published. Listening for commands.")
+    for entity in ("brightness", "screen", "dashboard", "speaker_volume", "talk"):
+        client.subscribe(command_topic(entity))
+    print(f"[mqtt] Discovery published ({', '.join(sorted(FEATURES))}).")
 
 
 def on_message(client, userdata, msg):
-    topic   = msg.topic
-    payload = msg.payload.decode().strip()
+    topic = msg.topic
+    payload = msg.payload.decode(errors="replace").strip()
 
-    if topic == command_topic("tts_volume"):
-        try:
-            level = max(0, min(100, int(float(payload))))
-        except ValueError:
+    if topic == command_topic("brightness") and "brightness" in FEATURES:
+        level = _pct(payload)
+        if level is None:
             return
-        _set_alsa("TTS Volume", level)
-        _write_state(TTS_VOL_FILE, level)
-        client.publish(state_topic("tts_volume"), str(level), retain=True)
-        print(f"[tts-volume] → {level}%")
-
-    elif topic == command_topic("media_volume"):
-        try:
-            level = max(0, min(100, int(float(payload))))
-        except ValueError:
-            return
-        _set_alsa("Media Volume", level)
-        _write_state(MEDIA_VOL_FILE, level)
-        client.publish(state_topic("media_volume"), str(level), retain=True)
-        print(f"[media-volume] → {level}%")
-
-    elif topic == command_topic("brightness"):
-        try:
-            level = max(0, min(100, int(float(payload))))
-        except ValueError:
-            return
-        _set_brightness(level)
+        set_brightness_pct(level)
         client.publish(state_topic("brightness"), str(level), retain=True)
         print(f"[brightness] → {level}%")
 
-    elif topic == command_topic("mic_gain"):
-        try:
-            level = max(0, min(100, int(float(payload))))
-        except ValueError:
+    elif topic == command_topic("screen") and "screen" in FEATURES:
+        on = payload.upper() == "ON"
+        set_screen_on(on)
+        client.publish(state_topic("screen"), "ON" if on else "OFF", retain=True)
+        print(f"[screen] → {'on' if on else 'off'}")
+
+    elif topic == command_topic("dashboard") and "dashboard" in FEATURES:
+        # CDP calls block for up to a few seconds — keep the MQTT loop free.
+        threading.Thread(target=handle_dashboard, args=(payload,), daemon=True).start()
+
+    elif topic == command_topic("speaker_volume") and "speaker_volume" in FEATURES:
+        level = _pct(payload)
+        if level is None:
             return
-        _set_mic_gain(level)
-        _write_state(MIC_GAIN_FILE, level)
-        client.publish(state_topic("mic_gain"), str(level), retain=True)
-        print(f"[mic-gain] → {level}% (ALSA {round(level * MIC_GAIN_ALSA_MAX / 100)})")
+        if set_speaker_volume(level):
+            try:
+                SPEAKER_VOL_FILE.write_text(str(level))
+            except OSError as e:
+                print(f"[speaker] Save failed: {e}")
+            client.publish(state_topic("speaker_volume"), str(level), retain=True)
+            print(f"[speaker] → {level}%")
 
-    elif topic == command_topic("dashboard"):
-        _handle_dashboard(client, payload)
+    elif topic == command_topic("talk") and "talk" in FEATURES:
+        threading.Thread(target=lva_command, args=("start_listening",), daemon=True).start()
 
-def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+
+def on_disconnect(client, userdata, flags, reason_code, properties):
     if reason_code.is_failure:
-        print(f"[mqtt] Unexpected disconnect: {reason_code}. paho will reconnect.")
+        print(f"[mqtt] Unexpected disconnect: {reason_code}. Reconnecting.")
 
 
-# ── Startup & signal handling ──────────────────────────────────────────────────
 def _shutdown(sig, frame):
-    print("[exit] MQTT bridge shutting down.")
+    print("[exit] Shutting down.")
     client.publish(AVAIL_TOPIC, "offline", retain=True)
     client.disconnect()
     sys.exit(0)
 
-signal.signal(signal.SIGTERM, _shutdown)
-signal.signal(signal.SIGINT,  _shutdown)
 
 client = mqtt.Client(
     callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
     client_id=f"smart-display-{DEVICE_ID}",
 )
-client.on_connect    = on_connect
-client.on_message    = on_message
+client.on_connect = on_connect
+client.on_message = on_message
 client.on_disconnect = on_disconnect
-
-# LWT: if the Pi disconnects ungracefully, HA marks the device unavailable
 client.will_set(AVAIL_TOPIC, "offline", retain=True)
-
-# Automatic reconnection with exponential backoff (1s → 32s)
 client.reconnect_delay_set(min_delay=1, max_delay=32)
-
 if MQTT_USERNAME:
     client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
 
-print(f"[ready] Smart Display MQTT bridge starting.")
-print(f"        Broker  : {MQTT_HOST}:{MQTT_PORT}")
-print(f"        Device  : {DEVICE_NAME} ({DEVICE_ID})")
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
 
-client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=60)
-client.loop_forever()
+    print(f"[ready] TuneoutDisplay MQTT bridge {SW_VERSION}")
+    print(f"        Broker   : {MQTT_HOST}:{MQTT_PORT}")
+    print(f"        Device   : {DEVICE_NAME} ({DEVICE_ID})")
+    print(f"        Features : {', '.join(sorted(FEATURES))}")
+    if BACKLIGHT_DIR:
+        print(f"        Backlight: {BACKLIGHT_DIR}")
+
+    if "speaker_volume" in FEATURES:
+        threading.Thread(target=restore_speaker_volume, daemon=True).start()
+
+    client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=60)
+    client.loop_forever()

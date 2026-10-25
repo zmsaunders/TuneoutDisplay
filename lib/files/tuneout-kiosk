@@ -1,0 +1,59 @@
+#!/bin/bash
+# TuneoutDisplay kiosk launcher — run by cage (see tuneout-kiosk.service).
+# Waits for Home Assistant, then execs Chromium. Settings come from
+# /etc/smart-display/kiosk.env via the service's EnvironmentFile.
+set -u
+
+: "${KIOSK_URL:?KIOSK_URL not set}"
+: "${HA_ORIGIN:=$KIOSK_URL}"
+: "${CDP_PORT:=9222}"
+: "${PROFILE_DIR:=$HOME/.local/share/tuneout-kiosk/chromium}"
+
+# Wait for HA so the screen never sticks on a "can't reach" page at boot.
+# -k: only a reachability check, so self-signed certs mustn't block it.
+until curl -sk -o /dev/null --max-time 5 "$HA_ORIGIN"; do
+    sleep 3
+done
+
+# After a power cut Chromium thinks it crashed and offers to restore tabs.
+# Mark the last session as clean so the kiosk opens straight to the URL.
+PREFS="$PROFILE_DIR/Default/Preferences"
+if [ -f "$PREFS" ]; then
+    sed -i -e 's/"exited_cleanly":false/"exited_cleanly":true/' \
+           -e 's/"exit_type":"[^"]*"/"exit_type":"Normal"/' "$PREFS"
+fi
+
+BROWSER="$(command -v chromium || command -v chromium-browser)"
+
+# Notes on flags:
+#  --user-data-dir   Chromium ignores --remote-debugging-port on the default
+#                    profile (Chrome 136+), so the kiosk has its own.
+#  --remote-debugging-port  Binds 127.0.0.1 only. The MQTT bridge connects
+#                    without an Origin header, so --remote-allow-origins isn't needed.
+#  --renderer-process-limit / --max-old-space-size  memory caps for 1 GB boards.
+#  --disable-pinch / --overscroll-history-navigation=0  no accidental zoom or
+#                    swipe-back with native touch.
+# shellcheck disable=SC2086  # CHROMIUM_EXTRA_FLAGS is intentionally word-split
+exec "$BROWSER" \
+    --kiosk \
+    --ozone-platform=wayland \
+    --user-data-dir="$PROFILE_DIR" \
+    --remote-debugging-port="$CDP_PORT" \
+    --noerrdialogs \
+    --disable-infobars \
+    --no-first-run \
+    --disable-session-crashed-bubble \
+    --hide-scrollbars \
+    --password-store=basic \
+    --check-for-update-interval=31536000 \
+    --disable-component-update \
+    --disable-extensions \
+    --disable-sync \
+    --disable-background-networking \
+    --disable-features=TranslateUI \
+    --disable-pinch \
+    --overscroll-history-navigation=0 \
+    --renderer-process-limit=1 \
+    --js-flags="--max-old-space-size=192" \
+    ${CHROMIUM_EXTRA_FLAGS:-} \
+    "$KIOSK_URL"
