@@ -73,6 +73,9 @@ kiosk_install() {
     _install_blank_cursor
     changed=$((changed | FILE_CHANGED))
 
+    _ignore_hdmi_cec_input
+    changed=$((changed | FILE_CHANGED))
+
     # PAM stack for the kiosk session: pam_systemd registers a logind session
     # on seat0/tty1, which is what lets cage open the display and input devices.
     install_file /etc/pam.d/tuneout-kiosk 644 << 'EOF'
@@ -115,6 +118,8 @@ EnvironmentFile=$KIOSK_ENV
 ExecStart=/usr/bin/cage -d -- $KIOSK_LAUNCHER
 Restart=always
 RestartSec=3
+# Chromium can be slow to quit; don't let a restart hang for the 90 s default.
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -128,6 +133,25 @@ EOF
         sudo systemctl restart "$KIOSK_SERVICE"
     fi
     success "Kiosk enabled → $KIOSK_URL"
+}
+
+# ── Ignore HDMI-CEC "remotes" as input ───────────────────────────────────────
+# The Pi registers an input device per HDMI port (vc4-hdmi-0/1) for CEC remote
+# control, even with nothing plugged in. The kernel's remote-control layer
+# advertises relative X/Y on every remote, so libinput treats them as pointing
+# devices. cage then gives the seat a pointer, Chromium believes a mouse is
+# attached, and draws its cursor mid-screen. Telling libinput to ignore them
+# leaves the touchscreen as the only input. Sets FILE_CHANGED.
+CEC_INPUT_RULE="/etc/udev/rules.d/90-tuneout-ignore-hdmi-cec-input.rules"
+_ignore_hdmi_cec_input() {
+    install_file "$CEC_INPUT_RULE" 644 << 'EOF'
+# Managed by TuneoutDisplay install.sh — HDMI-CEC remotes are not a mouse.
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="vc4-hdmi*", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+EOF
+    if [ "$FILE_CHANGED" = 1 ]; then
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --subsystem-match=input --action=change
+    fi
 }
 
 # ── Invisible cursor ─────────────────────────────────────────────────────────

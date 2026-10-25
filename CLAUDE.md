@@ -84,7 +84,7 @@ disables what's no longer used. Keep that pairing when adding features.
 ## Kiosk
 
 - `tuneout-kiosk.service`: `User=<user>`, `PAMName=tuneout-kiosk` (`/etc/pam.d/tuneout-kiosk` includes `pam_systemd` → logind session on seat0/tty1), `TTYPath=/dev/tty1`, `ExecStart=cage -d -- /usr/local/bin/tuneout-kiosk`. Conflicts with `getty@tty1`. If lightdm is enabled the installer disables it.
-- **Cursor:** cage centres the cursor at start and is meant to hide it with no pointer device, but on the Pi 4 + DSI touchscreen one still showed mid-screen. The installer ships an all-transparent Xcursor theme (`/usr/share/icons/tuneout-blank`, every name symlinked to one blank image), sets it via `XCURSOR_THEME` in the unit and as the user's default (`~/.icons/default/index.theme` → `Inherits=tuneout-blank`), which covers both wlroots and Chromium. Don't fix this with dashboard CSS.
+- **Cursor:** the Pi registers HDMI-CEC remotes (`vc4-hdmi-0/1`) as input devices even with no HDMI attached. The kernel remote-control layer gives every remote relative X/Y, so libinput treats them as pointers → cage's seat gets a pointer, Chromium reports `any-pointer: fine` and draws its own cursor where cage centred it. Fix: `/etc/udev/rules.d/90-tuneout-ignore-hdmi-cec-input.rules` sets `LIBINPUT_IGNORE_DEVICE=1` for `vc4-hdmi*`. An all-transparent Xcursor theme (`tuneout-blank`, via `XCURSOR_THEME` + `~/.icons/default`) is also installed; it did NOT fix the Chromium cursor on its own — remove it once the udev rule is confirmed on hardware. Don't fix this with dashboard CSS.
 - Launcher waits for the dashboard's origin (`curl -k`), clears Chromium's crashed-session flag, then execs Chromium.
 - **CDP:** `--remote-debugging-port=9222` binds 127.0.0.1. Chromium 136+ ignores it on the default profile, hence `--user-data-dir=~/.local/share/tuneout-kiosk/chromium`. The bridge connects with `suppress_origin=True`, so `--remote-allow-origins` is not used.
 - Touch: cage forwards real touch events; Chromium scrolls natively. `touch-scroll.py` is kept only as an opt-in fallback until that's confirmed on hardware — delete it once confirmed.
@@ -148,6 +148,7 @@ card slider min is 5 (intentional).
 | No audio sink after choosing an output | Overlay needs a reboot | Reboot; `aplay -l`, `wpctl status` |
 | Music volume changes TTS volume too | sendspin running with hardware volume | Unit must pass `--hardware-volume false` |
 | LVA wakes on its own TTS (display role) | Not reading the silent mic | `lva.env` has `AUDIO_INPUT_DEVICE=tuneout-silent-mic`; `pactl list short sources` shows it |
+| Cursor stuck mid-screen, Chromium reports `any-pointer: fine` | HDMI-CEC input devices count as a mouse | CEC ignore udev rule (installer); `udevadm info /dev/input/event0 \| grep LIBINPUT_IGNORE` |
 | `Text file busy` during LVA setup | Running LVA holds the venv python | Installer stops the service first |
 
 ## Diagnostics
