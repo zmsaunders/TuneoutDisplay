@@ -84,7 +84,7 @@ disables what's no longer used. Keep that pairing when adding features.
 ## Kiosk
 
 - `tuneout-kiosk.service`: `User=<user>`, `PAMName=tuneout-kiosk` (`/etc/pam.d/tuneout-kiosk` includes `pam_systemd` → logind session on seat0/tty1), `TTYPath=/dev/tty1`, `ExecStart=cage -d -- /usr/local/bin/tuneout-kiosk`. Conflicts with `getty@tty1`. If lightdm is enabled the installer disables it.
-- cage hides the cursor when there's no pointer device. Enabling the touch-scroll fallback adds a virtual pointer, so a cursor appears.
+- **Cursor:** cage centres the cursor at start and is meant to hide it with no pointer device, but on the Pi 4 + DSI touchscreen one still showed mid-screen. The installer ships an all-transparent Xcursor theme (`/usr/share/icons/tuneout-blank`, every name symlinked to one blank image), sets it via `XCURSOR_THEME` in the unit and as the user's default (`~/.icons/default/index.theme` → `Inherits=tuneout-blank`), which covers both wlroots and Chromium. Don't fix this with dashboard CSS.
 - Launcher waits for the dashboard's origin (`curl -k`), clears Chromium's crashed-session flag, then execs Chromium.
 - **CDP:** `--remote-debugging-port=9222` binds 127.0.0.1. Chromium 136+ ignores it on the default profile, hence `--user-data-dir=~/.local/share/tuneout-kiosk/chromium`. The bridge connects with `suppress_origin=True`, so `--remote-allow-origins` is not used.
 - Touch: cage forwards real touch events; Chromium scrolls natively. `touch-scroll.py` is kept only as an opt-in fallback until that's confirmed on hardware — delete it once confirmed.

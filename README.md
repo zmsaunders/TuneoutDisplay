@@ -215,6 +215,8 @@ virtual mic is added for LVA, which opens a microphone even in output-only mode.
 
 **MQTT entities missing** — check `/etc/smart-display/mqtt.env`, that discovery is enabled in HA, and `journalctl -u smart-display-mqtt -f`.
 
+**Mouse cursor visible on the kiosk** — the installer sets an invisible cursor theme; re-run `./install.sh` after `git pull`. Check `grep XCURSOR /etc/systemd/system/tuneout-kiosk.service` and `cat ~/.icons/default/index.theme`.
+
 **Touch doesn't scroll** — set `TOUCH_SCROLL=yes` in `~/.smart-display-settings` and re-run `./install.sh --non-interactive`.
 
 More checks: the `diagnose-display` skill (`.claude/skills/diagnose-display/SKILL.md`).
