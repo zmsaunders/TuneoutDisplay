@@ -125,7 +125,9 @@ ask_secret() {
     [ "${NON_INTERACTIVE:-0}" = 1 ] && return
     if [ -n "${!var-}" ]; then
         read -rsp "  $label (ENTER keeps saved): " in; echo
-        [ -n "$in" ] && printf -v "$var" '%s' "$in"
+        # Must be an if: a bare `[ -n "$in" ] && …` as the function's last
+        # command returns 1 on ENTER, and set -e then kills the installer.
+        if [ -n "$in" ]; then printf -v "$var" '%s' "$in"; fi
     else
         read -rsp "  $label: " in; echo
         printf -v "$var" '%s' "$in"

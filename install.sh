@@ -11,7 +11,10 @@
 # Idempotent: safe to re-run. Switching role / audio cleanly disables whatever
 # the new configuration doesn't use.
 # ─────────────────────────────────────────────────────────────────────────────
-set -euo pipefail
+set -Eeuo pipefail
+# Never die silently: name the failing command and line.
+# shellcheck disable=SC2154  # rc is assigned inside the trap itself
+trap 'rc=$?; echo -e "\n\033[0;31m✘  install.sh stopped (exit $rc) at ${BASH_SOURCE[0]##*/}:$LINENO: $BASH_COMMAND\033[0m" >&2' ERR
 
 # Resolve before any cd — BASH_SOURCE may be relative ("./install.sh").
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
